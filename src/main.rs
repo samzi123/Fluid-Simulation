@@ -30,12 +30,15 @@ const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.8;
 const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 20.0;
+const TARGET_DENSITY: f32 = 1000.0;
+const PRESSURE_MULTIPLIER: f32 = 0.1;
 
 fn main() {
     App::new()
         .init_resource::<MyWorldCoords>()
         .add_systems(Startup, setup)
         .add_systems(Update, update_position)
+        .add_systems(Update, update_densities)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Fluid Simulation".into(),
@@ -115,7 +118,13 @@ fn get_mouse_world_position(
 }
 
 // This system updates the position of the particles.
-fn update_position(mut particles: Query<(&mut Particle, &mut Transform)>, mut mycoords: ResMut<MyWorldCoords>, q_window: Query<&Window, With<PrimaryWindow>>, q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, time: Res<Time>) {
+fn update_position(
+    mut particles: Query<(&mut Particle, &mut Transform)>, 
+    mut mycoords: ResMut<MyWorldCoords>, 
+    q_window: Query<&Window, With<PrimaryWindow>>, 
+    q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, 
+    time: Res<Time>,
+) {
     let window_state = q_window.get_single().unwrap();
 
     if RESPOND_TO_MOUSE {
@@ -199,10 +208,10 @@ fn smoothing_kernel_derivative(radius: &f32, dst: &f32) -> f32 {
 }
 
 // Calculates the particle density of a given x and y coordinate.
-fn calculate_density(sample_x: &f32, sample_y: &f32, particles: &Query<(&Particle, &Transform)>) -> f32 {
+fn calculate_density(sample_x: &f32, sample_y: &f32, particles: &Query<&Transform, With<Particle>>) -> f32 {
     let mut density: f32 = 0.0;
 
-    for (_, transform) in particles.iter() {
+    for (transform) in particles.iter() {
         let distance = Vec2::new(sample_x - transform.translation.x, sample_y - transform.translation.y).length();
         let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
         density += PARTICLE_MASS * influence
@@ -212,18 +221,18 @@ fn calculate_density(sample_x: &f32, sample_y: &f32, particles: &Query<(&Particl
 }
 
 // Calculate and cache the density of each particle.
-fn update_densities(mut particles: Query<(&mut Particle, &Transform)>, particles_immutable: Query<(&Particle, &Transform)>) {
+fn update_densities(mut particles: Query<(&mut Particle, &Transform)>, particles_per_rowtransforms: Query<&Transform, With<Particle>>) {
     for (mut particle, transform) in particles.iter_mut() {
-        particle.density = calculate_density(&transform.translation.x, &transform.translation.y, &particles_immutable);
+        particle.density = calculate_density(&transform.translation.x, &transform.translation.y, &particles_per_rowtransforms);
     }
 }
 
-fn calculate_property_gradient(
+fn calculate_pressure_force(
     sample_x: &f32,
     sample_y: &f32,
     particles: &Query<(&Particle, &Transform)>,
 ) -> Vec2 {
-    let mut gradient = Vec2::new(0.0, 0.0);
+    let mut pressure_force = Vec2::new(0.0, 0.0);
 
     for (particle, transform) in particles.iter() {
         let distance = Vec2::new(sample_x - transform.translation.x, sample_y - transform.translation.y).length();
@@ -232,8 +241,12 @@ fn calculate_property_gradient(
 
         // gradient.x += influence * (sample_x - transform.translation.x);
         // gradient.y += influence * (sample_y - transform.translation.y);
-        gradient += dir * slope * PARTICLE_MASS / particle.density;
+        pressure_force += convert_density_to_pressure(&particle.density) * dir * slope * PARTICLE_MASS / particle.density;
     }
 
-    return gradient;
+    return pressure_force;
+}
+
+fn convert_density_to_pressure(density: &f32) -> f32 {
+    return PRESSURE_MULTIPLIER * (density - TARGET_DENSITY);
 }
