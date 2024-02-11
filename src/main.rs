@@ -1,5 +1,6 @@
 use bevy::{prelude::*, sprite::MaterialMesh2dBundle};
 use bevy::window::{PrimaryWindow, PresentMode};
+use rand::Rng;
 
 /// We will store the world position of the mouse cursor here.
 #[derive(Resource, Default)]
@@ -21,21 +22,23 @@ struct Particle {
     density: f32,
 }
 
-const NUM_PARTICLES: usize = 1000;
+const NUM_PARTICLES: usize = 402;
 const PARTICLE_RADIUS: f32 = 2.;
 const RESPOND_TO_MOUSE: bool = false;
 const GRAVITY: f32 = 9.81;
+// const GRAVITY: f32 = 0.0;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.8;
 const PARTICLE_MASS: f32 = 1.0;
-const SMOOTHING_RADIUS: f32 = 20.0;
-const TARGET_DENSITY: f32 = 1000.0;
-const PRESSURE_MULTIPLIER: f32 = 0.1;
+const SMOOTHING_RADIUS: f32 = 40.;
+const TARGET_DENSITY: f32 = 0.01;
+const PRESSURE_MULTIPLIER: f32 = 100.0;
 
 fn main() {
     App::new()
         .init_resource::<MyWorldCoords>()
+        .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
         .add_systems(Startup, setup)
         .add_systems(Update, update_position)
         .add_systems(Update, update_densities)
@@ -117,7 +120,7 @@ fn get_mouse_world_position(
     return None;
 }
 
-// This system updates the position of the particles.
+// Adjust particle positions to even out their density.
 fn update_position(
     mut particles: Query<(&mut Particle, &mut Transform)>, 
     mut mycoords: ResMut<MyWorldCoords>, 
@@ -149,17 +152,57 @@ fn update_position(
             transform.translation.x += particle.velocity.x * time.delta_seconds();
             transform.translation.y += particle.velocity.y * time.delta_seconds();
         }
-    } else {
     }
+
+    // Reset velocities. If we don't do this, we get some weird momentum effects.
+    for (mut particle, _) in particles.iter_mut() {
+        particle.velocity = Velocity { x: 0.0, y: 0.0 };
+    }
+
+    update_pressure_forces(&mut particles, &time);
 
     for (mut particle, mut transform) in particles.iter_mut() {
         // apply gravity
-        particle.velocity.y -= GRAVITY * time.delta_seconds();
+        // particle.velocity.y -= GRAVITY * time.delta_seconds();
+
         transform.translation.x += particle.velocity.x;
         transform.translation.y += particle.velocity.y;
 
         resolve_collisions(&mut particle, &mut transform, window_state);
     }
+}
+
+fn update_pressure_forces(mut particles: &mut Query<(&mut Particle, &mut Transform)>, time: &Res<Time>) {
+    let mut iter = particles.iter_combinations_mut();
+
+    while let Some([(mut particle_1, mut transform_1), (mut particle_2, mut transform_2)]) = iter.fetch_next() {
+        let distance = Vec2::new(transform_1.translation.x - transform_2.translation.x, transform_1.translation.y - transform_2.translation.y).length();
+        let mut dir = Vec2::new(0.0, 0.0);
+
+        // if distance > SMOOTHING_RADIUS {
+        //     continue;
+        // }
+        
+        if distance == 0.0 {
+            dir = get_random_direction();
+        } else {
+            dir = Vec2::new(transform_1.translation.x - transform_2.translation.x, transform_1.translation.y - transform_2.translation.y) / distance;
+        }
+
+        let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
+        
+        let pressure_force = convert_density_to_pressure(&particle_1.density) * dir * slope * PARTICLE_MASS / particle_1.density;
+        let pressure_acceleration = pressure_force / particle_1.density;
+        particle_1.velocity.x += pressure_acceleration.x * time.delta_seconds();
+        particle_1.velocity.y += pressure_acceleration.y * time.delta_seconds();
+    }
+}
+
+fn get_random_direction() -> Vec2 {
+    let mut rng = rand::thread_rng();
+    let x: f32 = rng.gen();
+    let y: f32 = rng.gen();
+    return Vec2::new(x, y);
 }
 
 // Bounce off walls of window.
@@ -191,27 +234,36 @@ fn sign(x: f32) -> f32 {
 
 // Calculate the relative 'influence' of a particle at a given distance from a point.
 fn smoothing_kernel(radius: &f32, dst: &f32) -> f32 {
-    let volume = std::f32::consts::PI * radius.powi(8) / 4.0;
-    let value = f32::max(0.0, radius * radius - dst * dst);
-    return value * value * value / volume;
+    if dst >= radius {
+        return 0.0;
+    }
+
+    let volume = (std::f32::consts::PI * radius.powi(4)) / 6.0;
+    return (radius - dst) * (radius - dst) / volume;
+
+    // if dst > radius {
+    //     return 0.0;
+    // }
+
+    // return f32::max(0.0, 1. - (dst / radius));
 }
 
 // Calculates gradient of the smoothing kernel at a given distance.
 fn smoothing_kernel_derivative(radius: &f32, dst: &f32) -> f32 {
-    if dst > radius {
+    if dst >= radius {
         return 0.0;
     }
 
-    let f: f32 = radius * radius - dst * dst;
-    let scale: f32 = -24. / (std::f32::consts::PI * radius.powi(8));
-    return scale * f * f * dst;
+    let scale = 12. / (std::f32::consts::PI * radius.powi(4));
+    return scale * (dst - radius);
+    // return *radius;
 }
 
 // Calculates the particle density of a given x and y coordinate.
 fn calculate_density(sample_x: &f32, sample_y: &f32, particles: &Query<&Transform, With<Particle>>) -> f32 {
     let mut density: f32 = 0.0;
 
-    for (transform) in particles.iter() {
+    for transform in particles.iter() {
         let distance = Vec2::new(sample_x - transform.translation.x, sample_y - transform.translation.y).length();
         let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
         density += PARTICLE_MASS * influence
@@ -221,9 +273,27 @@ fn calculate_density(sample_x: &f32, sample_y: &f32, particles: &Query<&Transfor
 }
 
 // Calculate and cache the density of each particle.
-fn update_densities(mut particles: Query<(&mut Particle, &Transform)>, particles_per_rowtransforms: Query<&Transform, With<Particle>>) {
-    for (mut particle, transform) in particles.iter_mut() {
-        particle.density = calculate_density(&transform.translation.x, &transform.translation.y, &particles_per_rowtransforms);
+fn update_densities(mut particles: Query<(&mut Particle, &Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, transforms: Query<&Transform, With<Particle>>, mut materials: ResMut<Assets<ColorMaterial>> ) {
+    for (mut particle, transform, color_mat) in particles.iter_mut() {
+        particle.density = calculate_density(&transform.translation.x, &transform.translation.y, &transforms);
+        // set color based on velocity
+        let particle_velocity = particle.velocity.x.abs() + particle.velocity.y.abs();
+        let particle_density = particle.density;
+        let col = Color::rgb(particle_density / TARGET_DENSITY, 0.0, 1. - (particle_density / TARGET_DENSITY));
+
+        if color_mat.0.is_some() {
+            let some_color = &mut color_mat.0.unwrap().color;
+            // *some_color = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
+            *some_color = col;
+        }
+        if color_mat.1.is_some() {
+            let some_handle = color_mat.1.unwrap();
+            let some_color = &mut materials.get_mut(some_handle).unwrap().color;
+
+            // *some_color = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
+            *some_color = col;
+
+        }
     }
 }
 
@@ -236,6 +306,11 @@ fn calculate_pressure_force(
 
     for (particle, transform) in particles.iter() {
         let distance = Vec2::new(sample_x - transform.translation.x, sample_y - transform.translation.y).length();
+        
+        if distance == 0.0 {
+            continue;
+        }
+
         let dir = Vec2::new(sample_x - transform.translation.x, sample_y - transform.translation.y) / distance;
         let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
 
