@@ -20,6 +20,7 @@ struct Particle {
 const NUM_PARTICLES: usize = 402;
 const PARTICLE_RADIUS: f32 = 4.;
 const RESPOND_TO_MOUSE: bool = true;
+const MOUSE_RADIUS: f32 = 150.0;
 const GRAVITY: f32 = 50.1;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
@@ -135,15 +136,14 @@ fn update_position(
 
         if mouse_pos != None {
             for (mut particle, mut transform, _) in particles.iter_mut() {
-                let distance = mycoords.0 - transform.translation.xy();
-                let euclidean_distance = (distance.x * distance.x + distance.y * distance.y).sqrt();
+                let dir = mycoords.0 - transform.translation.xy();
+                let euclidean_distance = dir.length();
                 
-                if euclidean_distance > 150.0 {
+                if euclidean_distance > MOUSE_RADIUS {
                     continue;
                 }
 
-                particle.velocity.x = -distance.x;
-                particle.velocity.y = -distance.y;
+                particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 60. * PRESSURE_MULTIPLIER;
 
                 // move towards/away from mouse
                 transform.translation.x += particle.velocity.x * time.delta_seconds();
@@ -170,7 +170,6 @@ fn update_position(
             // F = m * a, so a = F / m
             let pressure_force = particle.pressure_force / particle.density;
             particle.velocity += pressure_force * time.delta_seconds();
-            // particle.velocity.y += (particle.pressure_force.y / particle.density) * time.delta_seconds();
         }
 
         transform.translation.x += particle.velocity.x;
@@ -278,7 +277,7 @@ fn update_densities(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<
     for (particle, _, color_mat) in particles.iter_mut() {
         let particle_velocity = particle.velocity.x.abs() + particle.velocity.y.abs();
         // takes some trial and error to get a value that looks good
-        let color_val = (particle.density) * 1300.;
+        let color_val = (particle.density) * 1700.;
         let col = Color::rgb(color_val, 0.0, 1. - color_val);
         // let col = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
 
