@@ -27,7 +27,7 @@ const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 40.;
-const TARGET_DENSITY: f32 = 0.0001;
+const TARGET_DENSITY: f32 = 0.00015;
 const PRESSURE_MULTIPLIER: f32 = 3000.0;
 
 fn main() {
@@ -35,7 +35,7 @@ fn main() {
         .init_resource::<MyWorldCoords>()
         .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
         .add_systems(Startup, setup)
-        .add_systems(Update, update_position)
+        .add_systems(FixedUpdate, update_position)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Fluid Simulation".into(),
@@ -276,7 +276,7 @@ fn update_densities(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<
     for (particle, _, color_mat) in particles.iter_mut() {
         let particle_velocity = particle.velocity.x.abs() + particle.velocity.y.abs();
         // takes some trial and error to get a value that looks good
-        let color_val = (particle.density) * 1700.;
+        let color_val = (particle.density) * 1500.;
         let col = Color::rgb(color_val, 0.0, 1. - color_val);
         // let col = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
 
