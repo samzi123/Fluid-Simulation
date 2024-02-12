@@ -24,11 +24,11 @@ const MOUSE_RADIUS: f32 = 150.0;
 const GRAVITY: f32 = 50.1;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
-const COLLISION_DAMPING: f32 = 0.8;
+const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 40.;
 const TARGET_DENSITY: f32 = 0.0001;
-const PRESSURE_MULTIPLIER: f32 = 1800.0;
+const PRESSURE_MULTIPLIER: f32 = 3000.0;
 
 fn main() {
     App::new()
@@ -131,6 +131,13 @@ fn update_position(
 ) {
     let window_state = q_window.get_single().unwrap();
 
+    // Reset velocity, densities, and pressure. If we don't do this, we get some weird momentum effects.
+    for (mut particle, _, _) in particles.iter_mut() {
+        particle.velocity = Vec2::new(0.0, 0.0);
+        particle.pressure_force = Vec2::new(0.0, 0.0);
+        particle.density = 0.0;
+    }
+
     if RESPOND_TO_MOUSE {
         let mouse_pos = get_mouse_world_position(&mut mycoords, &q_window, &q_camera);
 
@@ -143,20 +150,9 @@ fn update_position(
                     continue;
                 }
 
-                particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 60. * PRESSURE_MULTIPLIER;
-
-                // move towards/away from mouse
-                transform.translation.x += particle.velocity.x * time.delta_seconds();
-                transform.translation.y += particle.velocity.y * time.delta_seconds();
+                particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 40. * PRESSURE_MULTIPLIER * time.delta_seconds();
             }
         }
-    }
-
-    // Reset velocity, densities, and pressure. If we don't do this, we get some weird momentum effects.
-    for (mut particle, _, _) in particles.iter_mut() {
-        particle.velocity = Vec2::new(0.0, 0.0);
-        particle.pressure_force = Vec2::new(0.0, 0.0);
-        particle.density = 0.0;
     }
 
     update_densities(&mut particles, &mut materials);
@@ -195,16 +191,19 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
         }
 
         let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
+        let shared_pressure_force = calculate_shared_pressure(&particle_1.density, &particle_2.density);
         
         if particle_2.density != 0.0 {
-            let pressure_force = convert_density_to_pressure(&particle_2.density) * dir * slope * PARTICLE_MASS / particle_2.density;
+            // let pressure_force = convert_density_to_pressure(&particle_2.density) * dir * slope * PARTICLE_MASS / particle_2.density;
+            let pressure_force = shared_pressure_force * dir * slope * PARTICLE_MASS / particle_2.density;
             particle_1.pressure_force += pressure_force;
         }
 
-        // do the same for particle 2 becuase iter_combinations_mut won't repeat this pair
+        // do the same for particle 2 because iter_combinations_mut won't repeat this pair
         if particle_1.density != 0.0 {
             dir = -dir;
-            let pressure_force_2 = convert_density_to_pressure(&particle_1.density) * dir * slope * PARTICLE_MASS / particle_1.density;
+            // let pressure_force_2 = convert_density_to_pressure(&particle_1.density) * dir * slope * PARTICLE_MASS / particle_1.density;
+            let pressure_force_2 = shared_pressure_force * dir * slope * PARTICLE_MASS / particle_1.density;
             particle_2.pressure_force += pressure_force_2;
         }
     }
@@ -291,6 +290,10 @@ fn update_densities(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<
             *some_color = col;
         }
     }
+}
+
+fn calculate_shared_pressure(density_1: &f32, density_2: &f32) -> f32 {
+    return (convert_density_to_pressure(density_1) + convert_density_to_pressure(density_2)) / 2.0;
 }
 
 // Converts a particle's density to a pressure force.
