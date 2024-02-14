@@ -1,6 +1,8 @@
 use bevy::{prelude::*, sprite::MaterialMesh2dBundle};
 use bevy::window::{PrimaryWindow, PresentMode};
 use rand::Rng;
+mod particle_grid;
+use particle_grid::{Particle, ParticleGrid};
 
 /// We will store the world position of the mouse cursor here.
 #[derive(Resource, Default)]
@@ -10,32 +12,26 @@ struct MyWorldCoords(Vec2);
 #[derive(Component)]
 struct MainCamera;
 
-#[derive(Component, Debug)]
-struct Particle {
-    velocity: Vec2,
-    density: f32,
-    pressure_force: Vec2,
-}
-
 const NUM_PARTICLES: usize = 402;
 const PARTICLE_RADIUS: f32 = 4.;
 const RESPOND_TO_MOUSE: bool = true;
 const MOUSE_RADIUS: f32 = 150.0;
-const GRAVITY: f32 = 50.1;
+const GRAVITY: f32 = 40.1;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 40.;
-const TARGET_DENSITY: f32 = 0.00015;
-const PRESSURE_MULTIPLIER: f32 = 3000.0;
+const TARGET_DENSITY: f32 = 0.0001;
+const PRESSURE_MULTIPLIER: f32 = 1000.0;
 
 fn main() {
     App::new()
         .init_resource::<MyWorldCoords>()
         .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
         .add_systems(Startup, setup)
-        .add_systems(FixedUpdate, update_position)
+        // .add_systems(FixedUpdate, update_position)
+        .add_systems(FixedUpdate, spatial_partition_update)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Fluid Simulation".into(),
@@ -52,42 +48,78 @@ fn setup(
     mut commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
+    q_window: Query<&Window, With<PrimaryWindow>>,
 ) {
+    let window_state = q_window.get_single().unwrap();
     commands.spawn((Camera2dBundle::default(), MainCamera));
-    spawn_particles(commands, meshes, materials);
+    spawn_particles(commands, meshes, materials, window_state);
 }
 
 fn spawn_particles(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    window_state: &Window,
 ) {
-    // spawn particles in a grid
-    let particles_per_row: i32 = (NUM_PARTICLES as f32).sqrt() as i32;
-    let particles_per_col: i32 = (NUM_PARTICLES as i32 - 1) / particles_per_row + 1;
-    let spacing: f32 = PARTICLE_RADIUS * 6.0;
+    let mut particle_grid = ParticleGrid::new(SMOOTHING_RADIUS, (window_state.height() / SMOOTHING_RADIUS).ceil() as usize, (window_state.width() / SMOOTHING_RADIUS).ceil() as usize, window_state);
+    particle_grid.spawn_particles(NUM_PARTICLES, PARTICLE_RADIUS, &mut commands, meshes, materials);
+    commands.spawn(particle_grid);
+}
 
-    for i in 0..NUM_PARTICLES {
-        let x = ((i as i32 % particles_per_row - particles_per_row / 2) as f32 + 0.5) as f32 * spacing;
-        let y = ((i as i32 / particles_per_row - particles_per_col / 2) as f32 + 0.5) as f32 * spacing;
+fn spatial_partition_update(
+    mut particle_grid: Query<&mut ParticleGrid>,
+    mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>,
+    mut mycoords: ResMut<MyWorldCoords>, 
+    q_window: Query<&Window, With<PrimaryWindow>>, 
+    q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, 
+    time: Res<Time>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let window_state = q_window.get_single().unwrap();
+    let mut grid = particle_grid.single_mut();
+    grid.update_particle_cells(&mut particles);
+    
+    // Reset velocity, densities, and pressure. If we don't do this, we get some weird momentum effects.
+    for (mut particle, _, _) in particles.iter_mut() {
+        particle.velocity = Vec2::new(0.0, 0.0);
+        particle.pressure_force = Vec2::new(0.0, 0.0);
+        particle.density = 0.0;
+    }
 
-        commands.spawn(
-            Particle {
-                velocity: Vec2::new(0.0, 0.0),
-                density: 0.0,
-                pressure_force: Vec2::new(0.0, 0.0),
+    if RESPOND_TO_MOUSE {
+        let mouse_pos = get_mouse_world_position(&mut mycoords, &q_window, &q_camera);
+
+        if mouse_pos != None {
+            for (mut particle, mut transform, _) in particles.iter_mut() {
+                let dir = mycoords.0 - transform.translation.xy();
+                let euclidean_distance = dir.length();
+                
+                if euclidean_distance > MOUSE_RADIUS {
+                    continue;
+                }
+
+                particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 40. * PRESSURE_MULTIPLIER * time.delta_seconds();
             }
-        )
-        // insert arrow to show velocity direction and circle for particle
-        .insert(MaterialMesh2dBundle {
-            mesh: meshes.add(shape::Circle {
-                radius: PARTICLE_RADIUS,
-                ..Default::default()
-            }.into()).into(),
-            material: materials.add(ColorMaterial::from(Color::WHITE)),
-            transform: Transform::from_translation(Vec3::new(x, y, 0.0)),
-            ..Default::default()
-        });
+        }
+    }
+
+    update_densities(&mut particles, &mut materials);
+    update_pressure_forces_test(&mut particles, &grid);
+
+    for (mut particle, mut transform, _) in particles.iter_mut() {
+        // apply gravity
+        // particle.velocity.y -= GRAVITY * time.delta_seconds();
+
+        if particle.density != 0.0 {
+            // F = m * a, so a = F / m
+            let pressure_force = particle.pressure_force / particle.density;
+            particle.velocity += pressure_force * time.delta_seconds();
+        }
+
+        transform.translation.x += particle.velocity.x;
+        transform.translation.y += particle.velocity.y;
+
+        resolve_collisions(&mut particle, &mut transform, window_state);
     }
 }
 
@@ -172,6 +204,76 @@ fn update_position(
         transform.translation.y += particle.velocity.y;
 
         resolve_collisions(&mut particle, &mut transform, window_state);
+    }
+}
+
+// Calculate the force between all particles to simulate pressure.
+fn update_pressure_forces_test(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, particle_grid: &ParticleGrid) {
+    let cell_offsets: [(i32, i32); 9] = [
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 0),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    ];
+
+    
+    for row in 0..particle_grid.num_rows {
+        for col in 0..particle_grid.num_cols {
+            for entity in particle_grid.particles[row][col].iter() {
+                
+                unsafe {
+                    let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
+                    
+                    // check collisions in neighboring cells
+                    for offset in cell_offsets.iter() {
+                        let new_row = (row as i32 + offset.0) as usize;
+                        let new_col = (col as i32 + offset.1) as usize;
+                        
+                        if particle_grid.is_row_col_valid(new_row, new_col) {
+                            for other_entity in particle_grid.particles[new_row][new_col].iter() {
+                                // We need to wrap this in "unsafe" because of the second "get" called on particles here.
+                                let (mut other_particle, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
+
+                                let distance = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y).length();
+                                let mut dir: Vec2;
+
+                                if distance == 0.0 {
+                                    // is there a better way of doing this?
+                                    dir = get_random_direction();
+                                } else {
+                                    dir = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y) / distance;
+                                }
+
+                                let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
+
+                                // if other_particle.density != 0.0 {
+                                //     particle.pressure_force += convert_density_to_pressure(&other_particle.density) * dir * slope * PARTICLE_MASS / other_particle.density;
+                                // }
+                                let shared_pressure_force = calculate_shared_pressure(&particle.density, &other_particle.density);
+        
+                                if other_particle.density != 0.0 {
+                                    let pressure_force = shared_pressure_force * dir * slope * PARTICLE_MASS / other_particle.density;
+                                    particle.pressure_force += pressure_force;
+                                }
+                        
+                                // do the same for particle 2 because iter_combinations_mut won't repeat this pair
+                                if particle.density != 0.0 {
+                                    dir = -dir;
+                                    // let pressure_force_2 = convert_density_to_pressure(&particle_1.density) * dir * slope * PARTICLE_MASS / particle_1.density;
+                                    let pressure_force_2 = shared_pressure_force * dir * slope * PARTICLE_MASS / other_particle.density;
+                                    other_particle.pressure_force += pressure_force_2;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -276,7 +378,7 @@ fn update_densities(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<
     for (particle, _, color_mat) in particles.iter_mut() {
         let particle_velocity = particle.velocity.x.abs() + particle.velocity.y.abs();
         // takes some trial and error to get a value that looks good
-        let color_val = (particle.density) * 1500.;
+        let color_val = (particle.density) * 1700.;
         let col = Color::rgb(color_val, 0.0, 1. - color_val);
         // let col = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
 
