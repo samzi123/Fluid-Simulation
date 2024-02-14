@@ -31,7 +31,7 @@ fn main() {
         .init_resource::<MyWorldCoords>()
         .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
         .add_systems(Startup, setup)
-        .add_systems(FixedUpdate, update_particle_positions)
+        .add_systems(FixedUpdate, (update_particle_positions, update_densities))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Fluid Simulation".into(),
@@ -75,7 +75,6 @@ fn update_particle_positions(
     q_window: Query<&Window, With<PrimaryWindow>>, 
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, 
     time: Res<Time>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let window_state = q_window.get_single().unwrap();
     let mut grid = particle_grid.single_mut();
@@ -85,7 +84,7 @@ fn update_particle_positions(
     for (mut particle, _, _) in particles.iter_mut() {
         particle.velocity = Vec2::new(0.0, 0.0);
         particle.pressure_force = Vec2::new(0.0, 0.0);
-        particle.density = 0.0;
+        // particle.density = 0.0;
     }
 
     if RESPOND_TO_MOUSE {
@@ -105,7 +104,6 @@ fn update_particle_positions(
         }
     }
 
-    update_densities(&mut particles, &mut materials);
     update_pressure_forces(&mut particles, &grid);
 
     for (mut particle, mut transform, _) in particles.iter_mut() {
@@ -115,7 +113,6 @@ fn update_particle_positions(
         if particle.density != 0.0 {
             // F = m * a, so a = F / m
             let pressure_force = particle.pressure_force / particle.density;
-
             particle.velocity += pressure_force * time.delta_seconds();
         }
         
@@ -173,7 +170,6 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
     for row in 0..particle_grid.num_rows {
         for col in 0..particle_grid.num_cols {
             for entity in particle_grid.particles[row][col].iter() {
-                
                 unsafe {
                     let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
                     
@@ -226,8 +222,8 @@ fn get_random_direction() -> Vec2 {
 
 // Bounce off walls of window.
 fn resolve_collisions(particle: &mut Particle, transform: &mut Transform, window_state: &Window) {
-    let half_bound_size_x = window_state.width() / 2.0 - PARTICLE_RADIUS * 2.0;
-    let half_bound_size_y = window_state.height() / 2.0 - PARTICLE_RADIUS * 2.0;
+    let half_bound_size_x = window_state.width() / 2.0 - PARTICLE_RADIUS;
+    let half_bound_size_y = window_state.height() / 2.0 - PARTICLE_RADIUS;
 
     if transform.translation.x.abs() > half_bound_size_x {
         transform.translation.x = half_bound_size_x * sign(transform.translation.x);
@@ -272,15 +268,64 @@ fn smoothing_kernel_derivative(radius: &f32, dst: &f32) -> f32 {
 }
 
 // Calculate and cache the density of each particle.
-fn update_densities(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, materials: &mut ResMut<Assets<ColorMaterial>> ) {
-    let mut iter = particles.iter_combinations_mut();
+// fn update_densities(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, materials: &mut ResMut<Assets<ColorMaterial>> ) {
+fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, mut materials: ResMut<Assets<ColorMaterial>>, mut particle_grid: Query<&mut ParticleGrid>) {
+    // Use partition grid to calculate density of each particle.
+    let grid = particle_grid.single_mut();
+    let cell_offsets: [(i32, i32); 9] = [
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 0),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    ];
 
-    while let Some([(mut particle_1, transform_1, _), (mut particle_2, transform_2, _)]) = iter.fetch_next() {
-        let distance = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y).length();
-        let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
-        particle_1.density += PARTICLE_MASS * influence;
-        particle_2.density += PARTICLE_MASS * influence;
+    
+    for row in 0..grid.num_rows {
+        for col in 0..grid.num_cols {
+            for entity in grid.particles[row][col].iter() {
+                unsafe {
+                    let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
+                    particle.density = 0.0;
+                    
+                    // check collisions in neighboring cells
+                    for offset in cell_offsets.iter() {
+                        let new_row = (row as i32 + offset.0) as usize;
+                        let new_col = (col as i32 + offset.1) as usize;
+                        
+                        if grid.is_row_col_valid(new_row, new_col) {
+                            for other_entity in grid.particles[new_row][new_col].iter() {
+                                // don't compare the same particle
+                                if *other_entity == *entity {
+                                    continue;
+                                }
+
+                                // We need to wrap this in "unsafe" because of the second "get" called on particles here.
+                                let (_, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
+
+                                let distance = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y).length();
+                                let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
+                                particle.density += PARTICLE_MASS * influence;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+    
+    // let mut iter = particles.iter_combinations_mut();
+
+    // while let Some([(mut particle_1, transform_1, _), (mut particle_2, transform_2, _)]) = iter.fetch_next() {
+    //     let distance = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y).length();
+    //     let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
+    //     particle_1.density += PARTICLE_MASS * influence;
+    //     particle_2.density += PARTICLE_MASS * influence;
+    // }
 
     // set color based on velocity/density
     for (particle, _, color_mat) in particles.iter_mut() {
