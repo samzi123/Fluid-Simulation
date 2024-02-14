@@ -124,6 +124,6 @@ impl ParticleGrid {
     }
 
     pub fn is_row_col_valid(&self, row: usize, col: usize) -> bool {
-        row >= 0 && row < self.num_rows && col >= 0 && col < self.num_cols
+        row < self.num_rows && col < self.num_cols
     }
 }
