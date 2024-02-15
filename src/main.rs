@@ -80,11 +80,10 @@ fn update_particle_positions(
     let mut grid = particle_grid.single_mut();
     grid.update_particle_cells(&mut particles);
     
-    // Reset velocity, densities, and pressure. If we don't do this, we get some weird momentum effects.
+    // Reset velocity and pressure. If we don't do this, we get some weird momentum effects.
     for (mut particle, _, _) in particles.iter_mut() {
         particle.velocity = Vec2::new(0.0, 0.0);
         particle.pressure_force = Vec2::new(0.0, 0.0);
-        // particle.density = 0.0;
     }
 
     if RESPOND_TO_MOUSE {
@@ -187,25 +186,8 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
 
                                 // We need to wrap this in "unsafe" because of the second "get" called on particles here.
                                 let (other_particle, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
-
-                                let distance = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y).length();
-                                let dir: Vec2;
-
-                                if distance == 0.0 {
-                                    // is there a better way of doing this?
-                                    dir = get_random_direction();
-                                } else {
-                                    dir = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y) / distance;
-                                }
-
-                                let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
-
-                                let shared_pressure_force = calculate_shared_pressure(&particle.density, &other_particle.density);
-        
-                                if other_particle.density != 0.0 {
-                                    let pressure_force = shared_pressure_force * dir * slope * PARTICLE_MASS / other_particle.density;
-                                    particle.pressure_force += pressure_force;
-                                }
+                                let pressure_force = calculate_force_between_two_particles(particle.density, other_particle.density, &transform, &other_transform);
+                                particle.pressure_force += pressure_force;
                             }
                         }
                     }
@@ -213,6 +195,28 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
             }
         }
     }
+}
+
+// Returns force acting on particle 1 due to particle 2.
+fn calculate_force_between_two_particles(density_1: f32, density_2: f32, transform_1: &Transform, transform_2: &Transform) -> Vec2 {
+    let distance = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y).length();
+    let dir: Vec2;
+
+    if distance == 0.0 {
+        // is there a better way of doing this?
+        dir = get_random_direction();
+    } else {
+        dir = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y) / distance;
+    }
+
+    let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
+    let shared_pressure_force = calculate_shared_pressure(&density_1, &density_2);
+
+    if 0.0 != density_2 {
+        return shared_pressure_force * dir * slope * PARTICLE_MASS / density_2;
+    }
+
+    Vec2::new(0.0, 0.0)
 }
 
 fn get_random_direction() -> Vec2 {
@@ -268,7 +272,6 @@ fn smoothing_kernel_derivative(radius: &f32, dst: &f32) -> f32 {
 }
 
 // Calculate and cache the density of each particle.
-// fn update_densities(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, materials: &mut ResMut<Assets<ColorMaterial>> ) {
 fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, mut materials: ResMut<Assets<ColorMaterial>>, mut particle_grid: Query<&mut ParticleGrid>) {
     // Use partition grid to calculate density of each particle.
     let grid = particle_grid.single_mut();
@@ -284,7 +287,6 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
         (1, 1),
     ];
 
-    
     for row in 0..grid.num_rows {
         for col in 0..grid.num_cols {
             for entity in grid.particles[row][col].iter() {
@@ -292,7 +294,7 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
                     let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
                     particle.density = 0.0;
                     
-                    // check collisions in neighboring cells
+                    // check for collisions in neighboring cells
                     for offset in cell_offsets.iter() {
                         let new_row = (row as i32 + offset.0) as usize;
                         let new_col = (col as i32 + offset.1) as usize;
@@ -304,7 +306,8 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
                                     continue;
                                 }
 
-                                // We need to wrap this in "unsafe" because of the second "get" called on particles here.
+                                // This line is the reason we need the "unsafe" above. 
+                                // The borrow checker doesn't like the second "get" called on particles here.
                                 let (_, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
 
                                 let distance = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y).length();
@@ -317,33 +320,46 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
             }
         }
     }
-    
-    // let mut iter = particles.iter_combinations_mut();
-
-    // while let Some([(mut particle_1, transform_1, _), (mut particle_2, transform_2, _)]) = iter.fetch_next() {
-    //     let distance = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y).length();
-    //     let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
-    //     particle_1.density += PARTICLE_MASS * influence;
-    //     particle_2.density += PARTICLE_MASS * influence;
-    // }
 
     // set color based on velocity/density
-    for (particle, _, color_mat) in particles.iter_mut() {
-        // takes some trial and error to get a value that looks good
-        let color_val = (particle.density) * 1700.;
-        let col = Color::rgb(color_val, 0.0, 1. - color_val);
-        // let col = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
+    for (particle, _, mut color_mat) in particles.iter_mut() {
+        let color_to_change: &mut Color;
 
-        if color_mat.0.is_some() {
-            let some_color = &mut color_mat.0.unwrap().color;
-            *some_color = col;
+        if let Some(color_material) = &mut color_mat.0 {
+            color_to_change = &mut color_material.color;
+        } else if let Some(color_handle) = color_mat.1 {
+            let color_material = materials.get_mut(color_handle).unwrap();
+            color_to_change = &mut color_material.color;
+        } else {
+            continue;
         }
-        if color_mat.1.is_some() {
-            let some_handle = color_mat.1.unwrap();
-            let some_color = &mut materials.get_mut(some_handle).unwrap().color;
-            *some_color = col;
-        }
+
+        set_particle_color_based_on_density(&particle, color_to_change);
     }
+}
+
+// red = density above target, green = at target density, blue = density below target
+fn set_particle_color_based_on_density(particle: &Particle, color: &mut Color) {
+    // takes some trial and error to get a value that looks good
+    // let color_val = (particle.density) * 1700.;
+    let dist_from_target_density = particle.density - TARGET_DENSITY;
+    let color_mutliplier: f32 = 1000.0;
+    let red: f32;
+    let blue: f32;
+
+    if dist_from_target_density > 0.0 {
+        red = dist_from_target_density * color_mutliplier;
+        blue = 0.0;
+    } else {
+        red = 0.0;
+        blue = -dist_from_target_density * color_mutliplier;
+    }
+
+    let green: f32 = 1. - (dist_from_target_density * color_mutliplier) - (red + blue);
+    
+    let new_color = Color::rgb(red, green, blue);
+    // let col = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
+    *color = new_color;
 }
 
 fn calculate_shared_pressure(density_1: &f32, density_2: &f32) -> f32 {
