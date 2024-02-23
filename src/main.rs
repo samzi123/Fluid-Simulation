@@ -343,20 +343,20 @@ fn set_particle_color_based_on_density(particle: &Particle, color: &mut Color) {
     // takes some trial and error to get a value that looks good
     // let color_val = (particle.density) * 1700.;
     let dist_from_target_density = particle.density - TARGET_DENSITY;
-    let color_mutliplier: f32 = 1000.0;
+    let color_mutliplier: f32 = 2000.0;
     let red: f32;
     let blue: f32;
 
     if dist_from_target_density > 0.0 {
-        red = dist_from_target_density * color_mutliplier;
+        red = f32::min(dist_from_target_density * color_mutliplier, 1.0);
         blue = 0.0;
     } else {
         red = 0.0;
-        blue = -dist_from_target_density * color_mutliplier;
+        blue = f32::min(-dist_from_target_density * color_mutliplier, 1.0);
     }
 
-    let green: f32 = 1. - (dist_from_target_density * color_mutliplier) - (red + blue);
-    
+    let green: f32 = f32::min(1.0, 1. - (dist_from_target_density * color_mutliplier) - (red + blue));
+        
     let new_color = Color::rgb(red, green, blue);
     // let col = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
     *color = new_color;

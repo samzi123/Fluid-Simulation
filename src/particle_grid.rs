@@ -7,6 +7,7 @@ pub struct Particle {
     pub pressure_force: Vec2,
     // if particle isn't assigned to a cell, this will be (usize::MAX, usize::MAX)
     pub particle_grid_index: (usize, usize),
+    // pub predicted_position: Vec2,
 }
 
 #[derive(Component, Debug)]
@@ -26,6 +27,7 @@ impl Particle {
             density: 0.0,
             pressure_force: Vec2::new(0.0, 0.0),
             particle_grid_index: (usize::MAX, usize::MAX),
+            predicted_position: Vec2::new(0.0, 0.0),
         }
     }
 }
