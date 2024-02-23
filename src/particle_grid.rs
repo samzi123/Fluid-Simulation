@@ -7,7 +7,7 @@ pub struct Particle {
     pub pressure_force: Vec2,
     // if particle isn't assigned to a cell, this will be (usize::MAX, usize::MAX)
     pub particle_grid_index: (usize, usize),
-    // pub predicted_position: Vec2,
+    pub predicted_position: Vec2,
 }
 
 #[derive(Component, Debug)]
@@ -66,7 +66,7 @@ impl ParticleGrid {
         // spawn particles in a grid
         let particles_per_row: i32 = (num_particles as f32).sqrt() as i32;
         let particles_per_col: i32 = (num_particles as i32 - 1) / particles_per_row + 1;
-        let spacing: f32 = particle_radius * 6.0;
+        let spacing: f32 = particle_radius * 2.0;
 
         for i in 0..num_particles {
             let x = ((i as i32 % particles_per_row - particles_per_row / 2) as f32 + 0.5) as f32 * spacing;
@@ -109,12 +109,36 @@ impl ParticleGrid {
                     let (mut particle, transform, _) = particles.get_mut(*entity).unwrap();
 
                     // assign particle to a cell
-                    let (row, col) = self.position_to_grid_index(&transform.translation.x, &transform.translation.y);
+                    // let (row, col) = self.position_to_grid_index(&transform.translation.x, &transform.translation.y);
+                    let (row, col) = self.position_to_grid_index(&particle.predicted_position.x, &particle.predicted_position.y);
                     particle.particle_grid_index = (row, col);
                     self.particles[row][col].push(*entity);
                 }
             }
         }
+    }
+
+    // Returns the entities of neighbouring particles.
+    // Note: The particle itself is not included in the result.
+    pub fn get_particle_neighbours(&self, entity: &Entity, row: usize, col: usize) -> Vec<Entity> {
+        let mut neighbours = Vec::new();
+
+        for r in -1..=1 {
+            for c in -1..=1 {
+                let new_row = row as i32 + r;
+                let new_col = col as i32 + c;
+
+                if self.is_row_col_valid(new_row as usize, new_col as usize) {
+                    for other_entity in self.particles[new_row as usize][new_col as usize].iter() {
+                        if *other_entity != *entity {
+                            neighbours.push(*other_entity);
+                        }
+                    }
+                }
+            }
+        }
+
+        neighbours
     }
 
     // Returns the row and col index that a particle should be in
