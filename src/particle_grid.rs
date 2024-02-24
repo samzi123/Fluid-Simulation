@@ -66,7 +66,7 @@ impl ParticleGrid {
         // spawn particles in a grid
         let particles_per_row: i32 = (num_particles as f32).sqrt() as i32;
         let particles_per_col: i32 = (num_particles as i32 - 1) / particles_per_row + 1;
-        let spacing: f32 = particle_radius * 2.0;
+        let spacing: f32 = particle_radius * 6.0;
 
         for i in 0..num_particles {
             let x = ((i as i32 % particles_per_row - particles_per_row / 2) as f32 + 0.5) as f32 * spacing;

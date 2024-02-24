@@ -13,22 +13,19 @@ struct MyWorldCoords(Vec2);
 #[derive(Component)]
 struct MainCamera;
 
-const NUM_PARTICLES: usize = 4052;
-const VISUALIZE_COLOR_BASED_ON: &str = "velocity"; // density or velocity
-const PARTICLE_RADIUS: f32 = 4.;
+const NUM_PARTICLES: usize = 1052;
+const VISUALIZE_COLOR_BASED_ON: &str = "density"; // density or velocity
+const PARTICLE_RADIUS: f32 = 3.;
 const RESPOND_TO_MOUSE: bool = true;
 const MOUSE_RADIUS: f32 = 150.0;
 const GRAVITY: f32 = 2.0;
-const WINDOW_WIDTH: f32 = 800.0;
+const WINDOW_WIDTH: f32 = 600.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
-const SMOOTHING_RADIUS: f32 = 40.;
-const TARGET_DENSITY: f32 = 0.0001;
-// const PRESSURE_MULTIPLIER: f32 = 2000.0;
-const PRESSURE_MULTIPLIER: f32 = 0.00000008;
-const EPSILON: f32 = 1e-4;
-const POLY6_CONSTANT: f32 = 315.0 / (64.0 * std::f32::consts::PI);
+const SMOOTHING_RADIUS: f32 = 50.;
+const TARGET_DENSITY: f32 = 0.0025;
+const PRESSURE_MULTIPLIER: f32 = 300.;
 
 fn main() {
     App::new()
@@ -84,7 +81,7 @@ fn update_particle_positions(
     let mut grid = particle_grid.single_mut();
     grid.update_particle_cells(&mut particles);
     
-    // Reset velocity and pressure. If we don't do this, we get some weird momentum effects.
+    // Calcualte each particle's predicted position to use for improved pressure force calculation.
     for (mut particle, transform, _) in particles.iter_mut() {
         particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -window_state.width() / 2.0 + PARTICLE_RADIUS);
         particle.predicted_position.x = f32::min(particle.predicted_position.x, window_state.width() / 2.0 - PARTICLE_RADIUS);
@@ -105,8 +102,8 @@ fn update_particle_positions(
                     continue;
                 }
 
-                // particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 40. * PRESSURE_MULTIPLIER * time.delta_seconds();
-                particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 10000. * time.delta_seconds();
+                particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * -10. * PRESSURE_MULTIPLIER * time.delta_seconds();
+                // particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 10000. * time.delta_seconds();
             }
         }
     }
@@ -199,9 +196,7 @@ fn calculate_force_between_two_particles(predicted_position_1: Vec2, predicted_p
     let distance = Vec2::new(predicted_position_2.x - predicted_position_1.x, predicted_position_2.y - predicted_position_1.y).length();
     let dir: Vec2;
 
-    if distance > SMOOTHING_RADIUS {
-        return Vec2::new(0.0, 0.0);
-    } else if distance < EPSILON {
+    if distance == 0.0 {
         // is there a better way of doing this?
         dir = get_random_direction();
     } else {
@@ -209,23 +204,11 @@ fn calculate_force_between_two_particles(predicted_position_1: Vec2, predicted_p
         dir = Vec2::new(predicted_position_2.x - predicted_position_1.x, predicted_position_2.y - predicted_position_1.y) / distance;
     }
 
-    let normalized_dir = dir.normalize();
-
     let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
     let shared_pressure_force = calculate_shared_pressure(&density_1, &density_2);
 
     if 0.0 != density_2 {
-        // return shared_pressure_force * normalized_dir * slope * PARTICLE_MASS / density_2;
-        // return shared_pressure_force * normalized_dir * slope * PARTICLE_MASS;
-        let r_squared = distance * distance;
-        let h_squared = SMOOTHING_RADIUS * SMOOTHING_RADIUS;
-        
-        if r_squared <= h_squared {
-            let poly6_kernel = POLY6_CONSTANT * (h_squared - r_squared).powi(3);
-            let pressure_force = poly6_kernel * slope * PARTICLE_MASS * PRESSURE_MULTIPLIER * (density_1 + density_2) / (2.0 * density_2);
-            
-            return pressure_force * normalized_dir;
-        }
+        return shared_pressure_force * dir * slope * PARTICLE_MASS / density_2;
     }
 
     Vec2::new(0.0, 0.0)
@@ -348,7 +331,8 @@ fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) 
     if VISUALIZE_COLOR_BASED_ON == "density" {
         dist_from_target_property = (particle.density - TARGET_DENSITY) * 2000.0;
     } else {
-        dist_from_target_property = (particle.velocity.length() * 0.7) - 0.5;
+        // dist_from_target_property = (particle.velocity.length() * 0.7) - 0.5;
+        dist_from_target_property = (particle.velocity.length() * 2.0) - 0.5;
     }
 
     // let color_mutliplier: f32 = 2000.0;
