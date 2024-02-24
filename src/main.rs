@@ -14,19 +14,20 @@ struct MyWorldCoords(Vec2);
 struct MainCamera;
 
 const NUM_PARTICLES: usize = 1052;
-const VISUALIZE_COLOR_BASED_ON: &str = "density"; // density or velocity
+const VISUALIZE_COLOR_BASED_ON: &str = "velocity"; // density or velocity
 const PARTICLE_RADIUS: f32 = 3.;
 const RESPOND_TO_MOUSE: bool = true;
 const MOUSE_RADIUS: f32 = 150.0;
-const GRAVITY: f32 = 2.0;
-const WINDOW_WIDTH: f32 = 600.0;
+const MOUSE_PRESSURE_MULTIPLIER: f32 = 10.0;
+const GRAVITY: f32 = 9.81;
+const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 50.;
 const TARGET_DENSITY: f32 = 0.0018;
-const PRESSURE_MULTIPLIER: f32 = 800.;
-const VISCOSITY_STRENGTH: f32 = 0.001;
+const PRESSURE_MULTIPLIER: f32 = 1500.;
+const VISCOSITY_STRENGTH: f32 = 0.01;
 
 fn main() {
     App::new()
@@ -85,7 +86,7 @@ fn update_particle_positions(
     for (mut particle, transform, _) in particles.iter_mut() {
         particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -window_state.width() / 2.0 + PARTICLE_RADIUS);
         particle.predicted_position.x = f32::min(particle.predicted_position.x, window_state.width() / 2.0 - PARTICLE_RADIUS);
-        particle.predicted_position.y = f32::max(transform.translation.y + particle.velocity.y * time.delta_seconds(), -window_state.height() / 2.0 + PARTICLE_RADIUS);
+        particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -window_state.height() / 2.0 + PARTICLE_RADIUS);
         particle.predicted_position.y = f32::min(particle.predicted_position.y, window_state.height() / 2.0 - PARTICLE_RADIUS);
         // particle.velocity = Vec2::new(0.0, 0.0);
     }
@@ -104,7 +105,7 @@ fn update_particle_positions(
                     continue;
                 }
 
-                particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * -10. * PRESSURE_MULTIPLIER * time.delta_seconds();
+                particle.velocity += smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * MOUSE_PRESSURE_MULTIPLIER * PRESSURE_MULTIPLIER * time.delta_seconds();
                 // particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 10000. * time.delta_seconds();
             }
         }
@@ -114,7 +115,7 @@ fn update_particle_positions(
 
     for (mut particle, mut transform, _) in particles.iter_mut() {
         // apply gravity
-        // particle.velocity.y -= GRAVITY * time.delta_seconds();
+        particle.velocity.y -= GRAVITY * time.delta_seconds();
 
         if particle.density != 0.0 {
             // F = m * a, so a = F / m
