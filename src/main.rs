@@ -24,8 +24,9 @@ const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 50.;
-const TARGET_DENSITY: f32 = 0.0025;
-const PRESSURE_MULTIPLIER: f32 = 300.;
+const TARGET_DENSITY: f32 = 0.0018;
+const PRESSURE_MULTIPLIER: f32 = 800.;
+const VISCOSITY_STRENGTH: f32 = 0.001;
 
 fn main() {
     App::new()
@@ -79,7 +80,6 @@ fn update_particle_positions(
 ) {
     let window_state = q_window.get_single().unwrap();
     let mut grid = particle_grid.single_mut();
-    grid.update_particle_cells(&mut particles);
     
     // Calcualte each particle's predicted position to use for improved pressure force calculation.
     for (mut particle, transform, _) in particles.iter_mut() {
@@ -89,6 +89,8 @@ fn update_particle_positions(
         particle.predicted_position.y = f32::min(particle.predicted_position.y, window_state.height() / 2.0 - PARTICLE_RADIUS);
         // particle.velocity = Vec2::new(0.0, 0.0);
     }
+
+    grid.update_particle_cells(&mut particles);
 
     if RESPOND_TO_MOUSE {
         let mouse_pos = get_mouse_world_position(&mut mycoords, &q_window, &q_camera);
@@ -181,13 +183,26 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
                     for other_entity in neighbours.iter() {
                          // We need to wrap this in "unsafe" because of the second "get" called on particles here.
                         let (other_particle, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
+
+                        // calculate pressure force due to other particle
                         let pressure_force = calculate_force_between_two_particles(particle.predicted_position, other_particle.predicted_position, particle.density, other_particle.density, &transform, &other_transform);
-                        particle.pressure_force += pressure_force;
+                        
+                        // calcualte viscosity force
+                        let viscosity_force = calculate_viscosity_between_two_particles(&particle, &other_particle, &transform, &other_transform);
+
+                        particle.pressure_force += pressure_force + viscosity_force;
                     }
                 }
             }
         }
     }
+}
+
+// Calculate the viscosity force acting on particle 1 due to particle 2.
+fn calculate_viscosity_between_two_particles(particle_1: &Particle, particle_2: &Particle, transform_1: &Transform, transform_2: &Transform) -> Vec2 {
+    let distance = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y).length();
+    let influence = viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &distance);
+    return VISCOSITY_STRENGTH * (particle_2.velocity - particle_1.velocity) * influence;
 }
 
 // Returns force acting on particle 1 due to particle 2.
@@ -246,6 +261,12 @@ fn sign(x: f32) -> f32 {
     }
 }
 
+// Custom SPH function for viscosity force.
+fn viscosity_smoothing_kernel(radius: &f32, dst: &f32) -> f32 {
+    let value = f32::max(0., radius * radius - dst * dst);
+    value * value * value / (radius * radius * radius * radius * radius * radius)
+}
+
 // Calculate the relative 'influence' of a particle at a given distance from a point.
 fn smoothing_kernel(radius: &f32, dst: &f32) -> f32 {
     if dst >= radius {
@@ -293,9 +314,10 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
                     for other_entity in neighbours.iter() {
                         // This line is the reason we need the "unsafe" above. 
                         // The borrow checker doesn't like the second "get" called on particles here.
-                        let (_, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
+                        let (other_particle, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
 
-                        let distance = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y).length();
+                        let distance = Vec2::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y).length();
+                        // let distance = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y).length();
                         let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
                         particle.density += PARTICLE_MASS * influence;
                     }
