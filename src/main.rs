@@ -1,7 +1,6 @@
 mod particle_grid;
 
 use bevy::prelude::*;
-use bevy::tasks::prelude::*;
 use bevy::ecs::query::BatchingStrategy;
 use bevy::window::{PrimaryWindow, PresentMode};
 use rand::Rng;
@@ -85,6 +84,7 @@ fn update_particle_positions(
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, 
     time: Res<Time>,
 ) {
+    let start = std::time::Instant::now();
     let window_state = q_window.get_single().unwrap();
     let mut grid = particle_grid_query.single_mut();
 
@@ -138,6 +138,9 @@ fn update_particle_positions(
 
         resolve_collisions(&mut particle, &mut transform, window_state);
     });
+
+    let time_for_update = start.elapsed();
+    info!("Updated particle positions in: {:?}s", time_for_update);
 }
 
 // Returns the mouse position in world coordinates
