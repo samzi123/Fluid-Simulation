@@ -1,6 +1,8 @@
 mod particle_grid;
 
 use bevy::prelude::*;
+use bevy::tasks::prelude::*;
+use bevy::ecs::query::BatchingStrategy;
 use bevy::window::{PrimaryWindow, PresentMode};
 use rand::Rng;
 use particle_grid::{Particle, ParticleGrid};
@@ -76,7 +78,7 @@ fn spawn_particles(
 
 // Updates the position of the particles based on their density and pressure.
 fn update_particle_positions(
-    mut particle_grid: Query<&mut ParticleGrid>,
+    mut particle_grid_query: Query<&mut ParticleGrid>,
     mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>,
     mut mycoords: ResMut<MyWorldCoords>, 
     q_window: Query<&Window, With<PrimaryWindow>>, 
@@ -84,15 +86,16 @@ fn update_particle_positions(
     time: Res<Time>,
 ) {
     let window_state = q_window.get_single().unwrap();
-    let mut grid = particle_grid.single_mut();
-    
+    let mut grid = particle_grid_query.single_mut();
+
     // Calcualte each particle's predicted position to use for improved pressure force calculation.
-    for (mut particle, transform, _) in particles.iter_mut() {
+    // Choose batch size of 32 to limit overhead of ParallelIterator, since getting predicted pos is inexpensive.
+    particles.par_iter_mut().batching_strategy(BatchingStrategy::fixed(32)).for_each(|(mut particle, transform, _)| {
         particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -window_state.width() / 2.0 + PARTICLE_RADIUS);
         particle.predicted_position.x = f32::min(particle.predicted_position.x, window_state.width() / 2.0 - PARTICLE_RADIUS);
         particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -window_state.height() / 2.0 + PARTICLE_RADIUS);
         particle.predicted_position.y = f32::min(particle.predicted_position.y, window_state.height() / 2.0 - PARTICLE_RADIUS);
-    }
+    });
 
     grid.update_particle_cells(&mut particles);
 
@@ -120,7 +123,7 @@ fn update_particle_positions(
 
     update_pressure_forces(&mut particles, &grid, &window_state);
 
-    for (mut particle, mut transform, _) in particles.iter_mut() {
+    particles.par_iter_mut().batching_strategy(BatchingStrategy::fixed(32)).for_each(|(mut particle, mut transform, _)| {
         // apply gravity
         particle.velocity.y -= GRAVITY * time.delta_seconds();
 
@@ -134,7 +137,7 @@ fn update_particle_positions(
         transform.translation.y += particle.velocity.y;
 
         resolve_collisions(&mut particle, &mut transform, window_state);
-    }
+    });
 }
 
 // Returns the mouse position in world coordinates
@@ -297,10 +300,6 @@ fn smoothing_kernel(radius: &f32, dst: &f32) -> f32 {
 
 // Calculates gradient of the smoothing kernel at a given distance.
 fn smoothing_kernel_derivative(radius: &f32, dst: &f32) -> f32 {
-    if dst >= radius {
-        return 0.0;
-    }
-
     let scale = 12. / (std::f32::consts::PI * radius.powi(4));
     return scale * (dst - radius);
 }
@@ -332,27 +331,31 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
         }
     }
 
-    // set color based on velocity/density
+    // Set color based on velocity/density
+    // Note: can't use par_iter_mut here because we need to access the materials asset,
+    // and we can't access resources mutably without using locks.
     for (particle, _, mut color_mat) in particles.iter_mut() {
-        let color_to_change: &mut Color;
+            let color_to_change: &mut Color;
 
-        if let Some(color_material) = &mut color_mat.0 {
-            color_to_change = &mut color_material.color;
-        } else if let Some(color_handle) = color_mat.1 {
-            let color_material = materials.get_mut(color_handle).unwrap();
-            color_to_change = &mut color_material.color;
-        } else {
-            continue;
+            if let Some(color_material) = &mut color_mat.0 {
+                color_to_change = &mut color_material.color;
+            } else if let Some(color_handle) = color_mat.1 {
+                let color_material = materials.get_mut(color_handle).unwrap();
+                color_to_change = &mut color_material.color;
+            } else {
+                return;
+            }
+
+            set_particle_color_based_on_property(&particle, color_to_change);
         }
-
-        set_particle_color_based_on_property(&particle, color_to_change);
-    }
 }
 
 // red = density above target, green = at target density, blue = density below target
 fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) {
-    // how far from the target property (density/velocity) the particle is (positive or negative
+    // how far from the target property (density/velocity) the particle is
     let dist_from_target_property: f32;
+    let red: f32;
+    let blue: f32;
 
     if VISUALIZE_COLOR_BASED_ON == "density" {
         dist_from_target_property = (particle.density - TARGET_DENSITY) * 80.0;
@@ -360,9 +363,6 @@ fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) 
         // dist_from_target_property = (particle.velocity.length() * 0.7) - 0.5;
         dist_from_target_property = (particle.velocity.length() * 2.0) - 0.5;
     }
-
-    let red: f32;
-    let blue: f32;
 
     if dist_from_target_property > 0.0 {
         red = f32::min(dist_from_target_property, 1.0);
