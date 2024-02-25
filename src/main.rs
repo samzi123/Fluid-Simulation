@@ -14,10 +14,11 @@ struct MyWorldCoords(Vec2);
 struct MainCamera;
 
 const NUM_PARTICLES: usize = 1052;
-const VISUALIZE_COLOR_BASED_ON: &str = "velocity"; // density or velocity
+const VISUALIZE_COLOR_BASED_ON: &str = "density"; // density or velocity
 const PARTICLE_RADIUS: f32 = 3.;
 const RESPOND_TO_MOUSE: bool = true;
 const MOUSE_RADIUS: f32 = 150.0;
+// how much force the mouse applies to the particles
 const MOUSE_PRESSURE_MULTIPLIER: f32 = 10.0;
 const GRAVITY: f32 = 9.81;
 const WINDOW_WIDTH: f32 = 800.0;
@@ -26,8 +27,11 @@ const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 50.;
 const TARGET_DENSITY: f32 = 0.0018;
-const PRESSURE_MULTIPLIER: f32 = 1500.;
+const PRESSURE_MULTIPLIER: f32 = 2500.;
 const VISCOSITY_STRENGTH: f32 = 0.01;
+// How much the window edge repels particles.
+// X value is for left/right walls, Y value is for top/bottom walls.
+const BOUNDARY_PRESSURE_MULTIPLIER: Vec2 = Vec2::new(0.02, 0.5);
 
 fn main() {
     App::new()
@@ -88,30 +92,33 @@ fn update_particle_positions(
         particle.predicted_position.x = f32::min(particle.predicted_position.x, window_state.width() / 2.0 - PARTICLE_RADIUS);
         particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -window_state.height() / 2.0 + PARTICLE_RADIUS);
         particle.predicted_position.y = f32::min(particle.predicted_position.y, window_state.height() / 2.0 - PARTICLE_RADIUS);
-        // particle.velocity = Vec2::new(0.0, 0.0);
     }
 
     grid.update_particle_cells(&mut particles);
 
     if RESPOND_TO_MOUSE {
-        let mouse_pos = get_mouse_world_position(&mut mycoords, &q_window, &q_camera);
+        let mouse_pos = get_mouse_world_position(&mut mycoords, &window_state, &q_camera);
 
         if mouse_pos != None {
-            for (mut particle, transform, _) in particles.iter_mut() {
-                let dir = mycoords.0 - transform.translation.xy();
-                let euclidean_distance = dir.length();
-                
-                if euclidean_distance > MOUSE_RADIUS {
-                    continue;
-                }
+            // find particles within mouse's radius and apply a force to them
+            let neighbours = grid.get_particles_adjacent_to_mouse(mycoords.0, &MOUSE_RADIUS);
 
-                particle.velocity += smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * MOUSE_PRESSURE_MULTIPLIER * PRESSURE_MULTIPLIER * time.delta_seconds();
-                // particle.velocity -= smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * 10000. * time.delta_seconds();
+            unsafe {
+                for entity in neighbours.iter() {
+                    // This line is the reason we need the "unsafe" above.
+                    let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
+                    let dir = mycoords.0 - transform.translation.xy();
+                    let euclidean_distance = dir.length();
+                    
+                    if euclidean_distance <= MOUSE_RADIUS {
+                        particle.velocity += smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * MOUSE_PRESSURE_MULTIPLIER * PRESSURE_MULTIPLIER * time.delta_seconds();
+                    }
+                }
             }
         }
     }
 
-    update_pressure_forces(&mut particles, &grid);
+    update_pressure_forces(&mut particles, &grid, &window_state);
 
     for (mut particle, mut transform, _) in particles.iter_mut() {
         // apply gravity
@@ -130,11 +137,11 @@ fn update_particle_positions(
     }
 }
 
-// returns the mouse position in world coordinates
+// Returns the mouse position in world coordinates
 fn get_mouse_world_position(
     mycoords: &mut ResMut<MyWorldCoords>,
     // query to get the window (so we can read the current cursor position)
-    q_window: &Query<&Window, With<PrimaryWindow>>,
+    window_state: &Window,
     // query to get camera transform
     q_camera: &Query<(&Camera, &GlobalTransform), With<MainCamera>>,
 ) -> Option<Vec2> {
@@ -142,12 +149,9 @@ fn get_mouse_world_position(
     // assuming there is exactly one main camera entity, so Query::single() is OK
     let (camera, camera_transform) = q_camera.single();
 
-    // There is only one primary window, so we can similarly get it from the query:
-    let window = q_window.single();
-
     // check if the cursor is inside the window and get its position
     // then, ask bevy to convert into world coordinates, and truncate to discard Z
-    if let Some(world_position) = window.cursor_position()
+    if let Some(world_position) = window_state.cursor_position()
         .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
         .map(|ray| ray.origin.truncate())
     {
@@ -159,20 +163,26 @@ fn get_mouse_world_position(
     return None;
 }
 
-// Calculate the force between all particles to simulate pressure.
-fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, particle_grid: &ParticleGrid) {
-    let cell_offsets: [(i32, i32); 9] = [
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, -1),
-        (0, 0),
-        (0, 1),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-    ];
+// Returns the force acting on a particle due to its proximity to the edge of the window.
+// For simplicity, assume the radius of influence of the window edge is the same as the smoothing radius.
+fn calculate_boundary_force(transform: &Transform, window_state: &Window) -> Vec2 {
+    let mut force = Vec2::new(0.0, 0.0);
+    let dist_from_x_boundary = (window_state.width() / 2.0) - transform.translation.x.abs();
+    let dist_from_y_boundary = (window_state.height() / 2.0) - transform.translation.y.abs();
 
+    if dist_from_x_boundary < SMOOTHING_RADIUS {
+        force.x = BOUNDARY_PRESSURE_MULTIPLIER.x * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_x_boundary) * -sign(transform.translation.x);
+    }
+
+    if dist_from_y_boundary < SMOOTHING_RADIUS {
+        force.y = BOUNDARY_PRESSURE_MULTIPLIER.y * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_y_boundary) * -sign(transform.translation.y);
+    }
+
+    force
+}
+
+// Calculate the force between all particles to simulate pressure.
+fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, particle_grid: &ParticleGrid, window_state: &Window) {
     for row in 0..particle_grid.num_rows {
         for col in 0..particle_grid.num_cols {
             for entity in particle_grid.particles[row][col].iter() {
@@ -181,15 +191,35 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
                     let neighbours = particle_grid.get_particle_neighbours(&entity, row, col);
                     particle.pressure_force = Vec2::new(0.0, 0.0);
 
+                    // if particle is along the edge of the window, apply a force to push it away
+                    if row == 0 || row == particle_grid.num_rows - 1 || col == 0 || col == particle_grid.num_cols - 1 {
+                        particle.pressure_force += calculate_boundary_force(&transform, &window_state);
+                    }
+
                     for other_entity in neighbours.iter() {
                          // We need to wrap this in "unsafe" because of the second "get" called on particles here.
-                        let (other_particle, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
+                        let (other_particle, _, _) = particles.get_unchecked(*other_entity).unwrap();
+
+                        // direction and distance from particle to other particle
+                        let dir: Vec2;
+                        let dist = Vec2::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y).length();
+
+                        if dist >= SMOOTHING_RADIUS {
+                            continue;
+                        }
+
+                        if dist == 0.0 {
+                            // is there a better way of doing this?
+                            dir = get_random_direction();
+                        } else {
+                            dir = Vec2::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y) / dist;
+                        }
 
                         // calculate pressure force due to other particle
-                        let pressure_force = calculate_force_between_two_particles(particle.predicted_position, other_particle.predicted_position, particle.density, other_particle.density, &transform, &other_transform);
+                        let pressure_force: Vec2 = calculate_force_between_two_particles(dir, &dist, particle.density, other_particle.density);
                         
                         // calcualte viscosity force
-                        let viscosity_force = calculate_viscosity_between_two_particles(&particle, &other_particle, &transform, &other_transform);
+                        let viscosity_force: Vec2 = calculate_viscosity_between_two_particles(&dist, &particle, &other_particle);
 
                         particle.pressure_force += pressure_force + viscosity_force;
                     }
@@ -200,27 +230,14 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
 }
 
 // Calculate the viscosity force acting on particle 1 due to particle 2.
-fn calculate_viscosity_between_two_particles(particle_1: &Particle, particle_2: &Particle, transform_1: &Transform, transform_2: &Transform) -> Vec2 {
-    let distance = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y).length();
-    let influence = viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &distance);
+fn calculate_viscosity_between_two_particles(dist: &f32, particle_1: &Particle, particle_2: &Particle) -> Vec2 {
+    let influence = viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist);
     return VISCOSITY_STRENGTH * (particle_2.velocity - particle_1.velocity) * influence;
 }
 
 // Returns force acting on particle 1 due to particle 2.
-fn calculate_force_between_two_particles(predicted_position_1: Vec2, predicted_position_2: Vec2, density_1: f32, density_2: f32, transform_1: &Transform, transform_2: &Transform) -> Vec2 {
-    // let distance = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y).length();
-    let distance = Vec2::new(predicted_position_2.x - predicted_position_1.x, predicted_position_2.y - predicted_position_1.y).length();
-    let dir: Vec2;
-
-    if distance == 0.0 {
-        // is there a better way of doing this?
-        dir = get_random_direction();
-    } else {
-        // dir = Vec2::new(transform_2.translation.x - transform_1.translation.x, transform_2.translation.y - transform_1.translation.y) / distance;
-        dir = Vec2::new(predicted_position_2.x - predicted_position_1.x, predicted_position_2.y - predicted_position_1.y) / distance;
-    }
-
-    let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &distance);
+fn calculate_force_between_two_particles(dir: Vec2, dist: &f32, density_1: f32, density_2: f32) -> Vec2 {
+    let slope = smoothing_kernel_derivative(&SMOOTHING_RADIUS, &dist);
     let shared_pressure_force = calculate_shared_pressure(&density_1, &density_2);
 
     if 0.0 != density_2 {
@@ -292,33 +309,21 @@ fn smoothing_kernel_derivative(radius: &f32, dst: &f32) -> f32 {
 fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, mut materials: ResMut<Assets<ColorMaterial>>, mut particle_grid: Query<&mut ParticleGrid>) {
     // Use partition grid to calculate density of each particle.
     let grid = particle_grid.single_mut();
-    let cell_offsets: [(i32, i32); 9] = [
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, -1),
-        (0, 0),
-        (0, 1),
-        (1, -1),
-        (1, 0),
-        (1, 1),
-    ];
 
     for row in 0..grid.num_rows {
         for col in 0..grid.num_cols {
             for entity in grid.particles[row][col].iter() {
                 unsafe {
-                    let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
+                    let (mut particle, _, _) = particles.get_unchecked(*entity).unwrap();
                     let neighbours = grid.get_particle_neighbours(&entity, row, col);
                     particle.density = 0.0;
 
                     for other_entity in neighbours.iter() {
                         // This line is the reason we need the "unsafe" above. 
                         // The borrow checker doesn't like the second "get" called on particles here.
-                        let (other_particle, other_transform, _) = particles.get_unchecked(*other_entity).unwrap();
+                        let (other_particle, _, _) = particles.get_unchecked(*other_entity).unwrap();
 
                         let distance = Vec2::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y).length();
-                        // let distance = Vec2::new(other_transform.translation.x - transform.translation.x, other_transform.translation.y - transform.translation.y).length();
                         let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
                         particle.density += PARTICLE_MASS * influence;
                     }
@@ -346,19 +351,16 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
 
 // red = density above target, green = at target density, blue = density below target
 fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) {
-    // takes some trial and error to get a value that looks good
-    // let color_val = (particle.density) * 1700.;
     // how far from the target property (density/velocity) the particle is (positive or negative
     let dist_from_target_property: f32;
 
     if VISUALIZE_COLOR_BASED_ON == "density" {
-        dist_from_target_property = (particle.density - TARGET_DENSITY) * 2000.0;
+        dist_from_target_property = (particle.density - TARGET_DENSITY) * 80.0;
     } else {
         // dist_from_target_property = (particle.velocity.length() * 0.7) - 0.5;
         dist_from_target_property = (particle.velocity.length() * 2.0) - 0.5;
     }
 
-    // let color_mutliplier: f32 = 2000.0;
     let red: f32;
     let blue: f32;
 
@@ -372,9 +374,7 @@ fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) 
 
     let green: f32 = f32::min(1.0, 1. - (dist_from_target_property) - (red + blue));
         
-    let new_color = Color::rgb(red, green, blue);
-    // let col = Color::rgb((particle_density * 100.), 0.0, 1. - (particle_density * 100.));
-    *color = new_color;
+    *color = Color::rgb(red, green, blue);
 }
 
 fn calculate_shared_pressure(density_1: &f32, density_2: &f32) -> f32 {

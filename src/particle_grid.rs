@@ -94,7 +94,9 @@ impl ParticleGrid {
         }
     }
 
+    // Update the grid with the current positions of the particles, and assign each particle to a cell using predicted positions.
     pub fn update_particle_cells(&mut self, particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>) {
+        // todo: find a way to do this without cloning
         let particles_clone = self.particles.clone();
 
         for r in 0..self.num_rows {
@@ -106,7 +108,7 @@ impl ParticleGrid {
         for r in 0..self.num_rows {
             for c in 0..self.num_cols {
                 for entity in particles_clone[r][c].iter() {
-                    let (mut particle, transform, _) = particles.get_mut(*entity).unwrap();
+                    let (mut particle, _, _) = particles.get_mut(*entity).unwrap();
 
                     // assign particle to a cell
                     // let (row, col) = self.position_to_grid_index(&transform.translation.x, &transform.translation.y);
@@ -118,22 +120,39 @@ impl ParticleGrid {
         }
     }
 
-    // Returns the entities of neighbouring particles.
-    // Note: The particle itself is not included in the result.
+    // Returns the entities of particles in cells within the mouse's sphere of influence.
+    // Note: no distance checks are performed.
+    pub fn get_particles_adjacent_to_mouse(&self, mouse_pos: Vec2, mouse_radius: &f32) -> Vec<Entity> {
+        let (row, col) = self.position_to_grid_index(&mouse_pos.x, &mouse_pos.y);
+        let mut neighbours = Vec::new();
+        let num_cells_in_radius = (mouse_radius / self.cell_width).ceil() as i32;
+
+        for r in -num_cells_in_radius..=num_cells_in_radius {
+            for c in -num_cells_in_radius..=num_cells_in_radius {
+                let new_row = (row as i32 + r) as usize;
+                let new_col = (col as i32 + c) as usize;
+
+                if self.is_row_col_valid(new_row, new_col) {
+                    neighbours.extend(self.particles[new_row][new_col].iter());
+                }
+            }
+        }
+
+        neighbours
+    }
+
+    // Returns the entities of particles in neighbouring cells.
+    // Note: The particle itself is not included in the result, and no distance checks are performed.
     pub fn get_particle_neighbours(&self, entity: &Entity, row: usize, col: usize) -> Vec<Entity> {
         let mut neighbours = Vec::new();
 
         for r in -1..=1 {
             for c in -1..=1 {
-                let new_row = row as i32 + r;
-                let new_col = col as i32 + c;
+                let new_row = (row as i32 + r) as usize;
+                let new_col = (col as i32 + c) as usize;
 
-                if self.is_row_col_valid(new_row as usize, new_col as usize) {
-                    for other_entity in self.particles[new_row as usize][new_col as usize].iter() {
-                        if *other_entity != *entity {
-                            neighbours.push(*other_entity);
-                        }
-                    }
+                if self.is_row_col_valid(new_row, new_col) {
+                    neighbours.extend(self.particles[new_row][new_col].iter().filter(|&&e| e != *entity));
                 }
             }
         }
