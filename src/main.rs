@@ -78,6 +78,8 @@ fn main() {
             primary_window: Some(Window {
                 // provide the ID selector string here
                 canvas: Some("#fluid-simulation-canvas".into()),
+                title: "Fluid Simulation".into(),
+                resolution: (WINDOW_WIDTH, WINDOW_HEIGHT).into(),
                 ..default()
             }),
             ..default()
