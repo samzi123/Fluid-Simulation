@@ -1634,6 +1634,7 @@ name = "fluid_simulation"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "console_error_panic_hook",
  "rand 0.3.23",
  "rayon",
 ]

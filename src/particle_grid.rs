@@ -33,7 +33,7 @@ impl Particle {
 }
 
 impl ParticleGrid {
-    pub fn new(cell_width: f32, num_rows: usize, num_cols: usize, window: &Window) -> Self {
+    pub fn new(cell_width: f32, num_rows: usize, num_cols: usize, window_width: f32, window_height: f32) -> Self {
         let mut particles = Vec::new();
 
         for _ in 0..num_rows {
@@ -50,8 +50,8 @@ impl ParticleGrid {
             num_rows: num_rows as usize,
             num_cols: num_cols as usize,
             particles,
-            window_width: window.width(),
-            window_height: window.height(),
+            window_width: window_width,
+            window_height: window_height,
         }
     }
 
@@ -162,8 +162,8 @@ impl ParticleGrid {
 
     // Returns the row and col index that a particle should be in
     pub fn position_to_grid_index(&self, x: &f32, y: &f32) -> (usize, usize) {
-        let row = ((y + (self.window_height / 2.0)) / self.cell_width) as usize;
-        let col = ((x + (self.window_width / 2.0)) / self.cell_width) as usize;
+        let row = (((y + (self.window_height / 2.0)) / self.cell_width) as usize).clamp(0, self.num_rows - 1);
+        let col = (((x + (self.window_width / 2.0)) / self.cell_width) as usize).clamp(0, self.num_cols - 1);
 
         (row, col)
     }
