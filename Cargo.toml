@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 bevy = "0.12.1"
 rand="0.3.14"
+rayon = "1.8.1"
 
 [profile.dev]
 opt-level = 1

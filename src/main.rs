@@ -5,6 +5,7 @@ use bevy::ecs::query::BatchingStrategy;
 use bevy::window::{PrimaryWindow, PresentMode};
 use rand::Rng;
 use particle_grid::{Particle, ParticleGrid};
+use rayon::prelude::*;
 
 /// We will store the world position of the mouse cursor here.
 #[derive(Resource, Default)]
@@ -14,14 +15,21 @@ struct MyWorldCoords(Vec2);
 #[derive(Component)]
 struct MainCamera;
 
+#[derive(Component)]
+struct Timer {
+    start_time: std::time::Instant,
+    // how many iterations to sum time for before printing the average
+    num_iters: u32,
+}
+
 const NUM_PARTICLES: usize = 1052;
-const VISUALIZE_COLOR_BASED_ON: &str = "density"; // density or velocity
+const VISUALIZE_COLOR_BASED_ON: &str = "velocity"; // density or velocity
 const PARTICLE_RADIUS: f32 = 3.;
 const RESPOND_TO_MOUSE: bool = true;
 const MOUSE_RADIUS: f32 = 150.0;
 // how much force the mouse applies to the particles
 const MOUSE_PRESSURE_MULTIPLIER: f32 = 10.0;
-const GRAVITY: f32 = 9.81;
+const GRAVITY: f32 = 0.;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
@@ -29,10 +37,14 @@ const PARTICLE_MASS: f32 = 1.0;
 const SMOOTHING_RADIUS: f32 = 50.;
 const TARGET_DENSITY: f32 = 0.0018;
 const PRESSURE_MULTIPLIER: f32 = 2500.;
-const VISCOSITY_STRENGTH: f32 = 0.01;
+const VISCOSITY_STRENGTH: f32 = 0.007;
+const RUN_STOPWATCH: bool = false;
+// how many times to run the simulation before printing the average time to update positions
+const NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH: u32 = 300;
 // How much the window edge repels particles.
 // X value is for left/right walls, Y value is for top/bottom walls.
-const BOUNDARY_PRESSURE_MULTIPLIER: Vec2 = Vec2::new(0.02, 0.5);
+const BOUNDARY_PRESSURE_MULTIPLIER: Vec2 = Vec2::new(0.02, 0.02);
+// const BOUNDARY_PRESSURE_MULTIPLIER: Vec2 = Vec2::new(0.02, 0.5);
 
 fn main() {
     App::new()
@@ -59,7 +71,7 @@ fn setup(
     q_window: Query<&Window, With<PrimaryWindow>>,
 ) {
     let window_state = q_window.get_single().unwrap();
-    commands.spawn((Camera2dBundle::default(), MainCamera));
+    commands.spawn((Camera2dBundle::default(), MainCamera, Timer { start_time: std::time::Instant::now(), num_iters: NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH }));
     spawn_particles(commands, meshes, materials, window_state);
 }
 
@@ -80,17 +92,33 @@ fn update_particle_positions(
     mut particle_grid_query: Query<&mut ParticleGrid>,
     mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>,
     mut mycoords: ResMut<MyWorldCoords>, 
+    mut timer_query: Query<&mut Timer>,
     q_window: Query<&Window, With<PrimaryWindow>>, 
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, 
     time: Res<Time>,
 ) {
-    let start = std::time::Instant::now();
+    if RUN_STOPWATCH {
+        let mut timer = timer_query.get_single_mut().unwrap();
+
+        if timer.num_iters == 0 {
+            info!("Average time per iteration: {:?}", timer.start_time.elapsed() / NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH);
+            timer.start_time = std::time::Instant::now();
+            timer.num_iters = NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH;
+        } else {
+            timer.num_iters -= 1;
+        }
+    }
+
+    // let start_time = std::time::Instant::now();
     let window_state = q_window.get_single().unwrap();
     let mut grid = particle_grid_query.single_mut();
 
     // Calcualte each particle's predicted position to use for improved pressure force calculation.
     // Choose batch size of 32 to limit overhead of ParallelIterator, since getting predicted pos is inexpensive.
-    particles.par_iter_mut().batching_strategy(BatchingStrategy::fixed(32)).for_each(|(mut particle, transform, _)| {
+    particles
+    .par_iter_mut()
+    .batching_strategy(BatchingStrategy::fixed(32))
+    .for_each(|(mut particle, transform, _)| {
         particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -window_state.width() / 2.0 + PARTICLE_RADIUS);
         particle.predicted_position.x = f32::min(particle.predicted_position.x, window_state.width() / 2.0 - PARTICLE_RADIUS);
         particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -window_state.height() / 2.0 + PARTICLE_RADIUS);
@@ -107,7 +135,8 @@ fn update_particle_positions(
             let neighbours = grid.get_particles_adjacent_to_mouse(mycoords.0, &MOUSE_RADIUS);
 
             unsafe {
-                for entity in neighbours.iter() {
+                neighbours.par_iter().for_each(|entity| {
+                        // for entity in neighbours.iter() {
                     // This line is the reason we need the "unsafe" above.
                     let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
                     let dir = mycoords.0 - transform.translation.xy();
@@ -116,14 +145,17 @@ fn update_particle_positions(
                     if euclidean_distance <= MOUSE_RADIUS {
                         particle.velocity += smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * MOUSE_PRESSURE_MULTIPLIER * PRESSURE_MULTIPLIER * time.delta_seconds();
                     }
-                }
+                });
             }
         }
     }
 
     update_pressure_forces(&mut particles, &grid, &window_state);
 
-    particles.par_iter_mut().batching_strategy(BatchingStrategy::fixed(32)).for_each(|(mut particle, mut transform, _)| {
+    particles
+    .par_iter_mut()
+    .batching_strategy(BatchingStrategy::fixed(32))
+    .for_each(|(mut particle, mut transform, _)| {
         // apply gravity
         particle.velocity.y -= GRAVITY * time.delta_seconds();
 
@@ -138,9 +170,6 @@ fn update_particle_positions(
 
         resolve_collisions(&mut particle, &mut transform, window_state);
     });
-
-    let time_for_update = start.elapsed();
-    info!("Updated particle positions in: {:?}s", time_for_update);
 }
 
 // Returns the mouse position in world coordinates
@@ -189,9 +218,12 @@ fn calculate_boundary_force(transform: &Transform, window_state: &Window) -> Vec
 
 // Calculate the force between all particles to simulate pressure.
 fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, particle_grid: &ParticleGrid, window_state: &Window) {
-    for row in 0..particle_grid.num_rows {
+    // for row in 0..particle_grid.num_rows {
+        particle_grid.particles.par_iter().enumerate().for_each(|(row, particle_list)| {
+
         for col in 0..particle_grid.num_cols {
             for entity in particle_grid.particles[row][col].iter() {
+            // particle_grid.particles[row][col].par_iter().for_each(|entity| {
                 unsafe {
                     let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
                     let neighbours = particle_grid.get_particle_neighbours(&entity, row, col);
@@ -232,7 +264,7 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
                 }
             }
         }
-    }
+    });
 }
 
 // Calculate the viscosity force acting on particle 1 due to particle 2.
@@ -312,7 +344,7 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
     // Use partition grid to calculate density of each particle.
     let grid = particle_grid.single_mut();
 
-    for row in 0..grid.num_rows {
+    grid.particles.par_iter().enumerate().for_each(|(row, particle_list)| {
         for col in 0..grid.num_cols {
             for entity in grid.particles[row][col].iter() {
                 unsafe {
@@ -332,7 +364,7 @@ fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(
                 }
             }
         }
-    }
+    });
 
     // Set color based on velocity/density
     // Note: can't use par_iter_mut here because we need to access the materials asset,
@@ -358,7 +390,7 @@ fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) 
     // how far from the target property (density/velocity) the particle is
     let dist_from_target_property: f32;
     let red: f32;
-    let blue: f32;
+    let green: f32;
 
     if VISUALIZE_COLOR_BASED_ON == "density" {
         dist_from_target_property = (particle.density - TARGET_DENSITY) * 80.0;
@@ -369,13 +401,13 @@ fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) 
 
     if dist_from_target_property > 0.0 {
         red = f32::min(dist_from_target_property, 1.0);
-        blue = 0.0;
+        green = 0.0;
     } else {
         red = 0.0;
-        blue = f32::min(-dist_from_target_property, 1.0);
+        green = f32::min(-dist_from_target_property, 1.0);
     }
 
-    let green: f32 = f32::min(1.0, 1. - (dist_from_target_property) - (red + blue));
+    let blue: f32 = f32::min(1.0, 1. - (dist_from_target_property) - (red + green));
         
     *color = Color::rgb(red, green, blue);
 }
