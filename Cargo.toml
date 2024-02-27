@@ -8,6 +8,7 @@ bevy = "0.12.1"
 console_error_panic_hook = "0.1.7"
 rand = "0.3.14"
 rayon = "1.8.1"
+bevy_flycam = "0.9"
 
 [profile.dev]
 opt-level = 1
