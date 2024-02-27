@@ -18,12 +18,12 @@ struct MyWorldCoords(Vec2);
 #[derive(Component)]
 struct MainCamera;
 
-// #[derive(Component)]
-// struct Timer {
-//     start_time: Instant,
-//     // how many iterations to sum time for before printing the average
-//     num_iters: u32,
-// }
+#[derive(Component)]
+struct Timer {
+    start_time: Instant,
+    // how many iterations to sum time for before printing the average
+    num_iters: u32,
+}
 
 const NUM_PARTICLES: usize = 1052;
 const VISUALIZE_COLOR_BASED_ON: &str = "velocity"; // density or velocity
@@ -46,7 +46,7 @@ const RUN_STOPWATCH: bool = false;
 const NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH: u32 = 300;
 // How much the window edge repels particles.
 // X value is for left/right walls, Y value is for top/bottom walls.
-const BOUNDARY_PRESSURE_MULTIPLIER: Vec2 = Vec2::new(0.02, 0.02);
+const BOUNDARY_PRESSURE_MULTIPLIER: Vec2 = Vec2::new(0.01, 0.01);
 const BUILD_FOR_WEB: bool = true;
 // const BOUNDARY_PRESSURE_MULTIPLIER: Vec2 = Vec2::new(0.02, 0.5);
 
@@ -93,33 +93,18 @@ fn setup(
     mut commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
-    q_window: Query<&Window, With<PrimaryWindow>>,
 ) {
-    let window_state = q_window.get_single().unwrap();
-    // commands.spawn((Camera2dBundle::default(), MainCamera, Timer { start_time: Instant::now(), num_iters: NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH }));
-    commands.spawn((Camera2dBundle::default(), MainCamera));
-    spawn_particles(commands, meshes, materials, window_state);
+    commands.spawn((Camera2dBundle::default(), MainCamera, Timer { start_time: Instant::now(), num_iters: NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH }));
+    spawn_particles(commands, meshes, materials);
 }
 
 fn spawn_particles(
     mut commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
-    window_state: &Window,
 ) {
-    let window_width: f32;
-    let window_height: f32;
-    
-    if BUILD_FOR_WEB {
-        window_width = WINDOW_WIDTH;
-        window_height = WINDOW_HEIGHT;
-    } else {
-        window_width = window_state.width();
-        window_height = window_state.height();
-    }
-
     // create spatial partitioning grid
-    let mut particle_grid = ParticleGrid::new(SMOOTHING_RADIUS, (window_height / SMOOTHING_RADIUS).ceil() as usize, (window_width / SMOOTHING_RADIUS).ceil() as usize, WINDOW_WIDTH, WINDOW_HEIGHT);
+    let mut particle_grid = ParticleGrid::new(SMOOTHING_RADIUS, (WINDOW_HEIGHT / SMOOTHING_RADIUS).ceil() as usize, (WINDOW_WIDTH / SMOOTHING_RADIUS).ceil() as usize, WINDOW_WIDTH, WINDOW_HEIGHT);
     particle_grid.spawn_particles(NUM_PARTICLES, PARTICLE_RADIUS, &mut commands, meshes, materials);
     commands.spawn(particle_grid);
 }
@@ -129,22 +114,22 @@ fn update_particle_positions(
     mut particle_grid_query: Query<&mut ParticleGrid>,
     mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>,
     mut mycoords: ResMut<MyWorldCoords>, 
-    // mut timer_query: Query<&mut Timer>,
+    mut timer_query: Query<&mut Timer>,
     q_window: Query<&Window, With<PrimaryWindow>>, 
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, 
     time: Res<Time>,
 ) {
-    // if RUN_STOPWATCH {
-    //     let mut timer = timer_query.get_single_mut().unwrap();
+    if RUN_STOPWATCH {
+        let mut timer = timer_query.get_single_mut().unwrap();
 
-    //     if timer.num_iters == 0 {
-    //         info!("Average time per iteration: {:?}", timer.start_time.elapsed() / NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH);
-    //         timer.start_time = Instant::now();
-    //         timer.num_iters = NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH;
-    //     } else {
-    //         timer.num_iters -= 1;
-    //     }
-    // }
+        if timer.num_iters == 0 {
+            info!("Average time per iteration: {:?}", timer.start_time.elapsed() / NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH);
+            timer.start_time = Instant::now();
+            timer.num_iters = NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH;
+        } else {
+            timer.num_iters -= 1;
+        }
+    }
 
     // let start_time = Instant::now();
     let window_state = q_window.get_single().unwrap();
@@ -156,21 +141,10 @@ fn update_particle_positions(
     .par_iter_mut()
     .batching_strategy(BatchingStrategy::fixed(32))
     .for_each(|(mut particle, transform, _)| {
-        let window_width: f32;
-        let window_height: f32;
-        
-        if BUILD_FOR_WEB {
-            window_width = WINDOW_WIDTH;
-            window_height = WINDOW_HEIGHT;
-        } else {
-            window_width = window_state.width();
-            window_height = window_state.height();
-        }
-
-        particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -window_width / 2.0 + PARTICLE_RADIUS);
-        particle.predicted_position.x = f32::min(particle.predicted_position.x, window_width / 2.0 - PARTICLE_RADIUS);
-        particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -window_height / 2.0 + PARTICLE_RADIUS);
-        particle.predicted_position.y = f32::min(particle.predicted_position.y, window_height / 2.0 - PARTICLE_RADIUS);
+        particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -WINDOW_WIDTH / 2.0 + PARTICLE_RADIUS);
+        particle.predicted_position.x = f32::min(particle.predicted_position.x, WINDOW_WIDTH / 2.0 - PARTICLE_RADIUS);
+        particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -WINDOW_HEIGHT / 2.0 + PARTICLE_RADIUS);
+        particle.predicted_position.y = f32::min(particle.predicted_position.y, WINDOW_HEIGHT / 2.0 - PARTICLE_RADIUS);
     });
 
     grid.update_particle_cells(&mut particles);
@@ -198,7 +172,7 @@ fn update_particle_positions(
         }
     }
 
-    update_pressure_forces(&mut particles, &grid, &window_state);
+    update_pressure_forces(&mut particles, &grid);
 
     particles
     .par_iter_mut()
@@ -216,7 +190,7 @@ fn update_particle_positions(
         transform.translation.x += particle.velocity.x;
         transform.translation.y += particle.velocity.y;
 
-        resolve_collisions(&mut particle, &mut transform, window_state);
+        resolve_collisions(&mut particle, &mut transform);
     });
 }
 
@@ -248,21 +222,10 @@ fn get_mouse_world_position(
 
 // Returns the force acting on a particle due to its proximity to the edge of the window.
 // For simplicity, assume the radius of influence of the window edge is the same as the smoothing radius.
-fn calculate_boundary_force(transform: &Transform, window_state: &Window) -> Vec2 {
+fn calculate_boundary_force(transform: &Transform) -> Vec2 {
     let mut force = Vec2::new(0.0, 0.0);
-    let window_width: f32;
-    let window_height: f32;
-    
-    if BUILD_FOR_WEB {
-        window_width = WINDOW_WIDTH;
-        window_height = WINDOW_HEIGHT;
-    } else {
-        window_width = window_state.width();
-        window_height = window_state.height();
-    }
-
-    let dist_from_x_boundary = (window_width / 2.0) - transform.translation.x.abs();
-    let dist_from_y_boundary = (window_height / 2.0) - transform.translation.y.abs();
+    let dist_from_x_boundary = (WINDOW_WIDTH / 2.0) - transform.translation.x.abs();
+    let dist_from_y_boundary = (WINDOW_HEIGHT / 2.0) - transform.translation.y.abs();
 
     if dist_from_x_boundary < SMOOTHING_RADIUS {
         force.x = BOUNDARY_PRESSURE_MULTIPLIER.x * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_x_boundary) * -sign(transform.translation.x);
@@ -276,7 +239,7 @@ fn calculate_boundary_force(transform: &Transform, window_state: &Window) -> Vec
 }
 
 // Calculate the force between all particles to simulate pressure.
-fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, particle_grid: &ParticleGrid, window_state: &Window) {
+fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<ColorMaterial>)>)>, particle_grid: &ParticleGrid) {
     // for row in 0..particle_grid.num_rows {
         particle_grid.particles.par_iter().enumerate().for_each(|(row, _)| {
 
@@ -290,7 +253,7 @@ fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, 
 
                     // if particle is along the edge of the window, apply a force to push it away
                     if row == 0 || row == particle_grid.num_rows - 1 || col == 0 || col == particle_grid.num_cols - 1 {
-                        particle.pressure_force += calculate_boundary_force(&transform, &window_state);
+                        particle.pressure_force += calculate_boundary_force(&transform);
                     }
 
                     for other_entity in neighbours.iter() {
@@ -350,20 +313,9 @@ fn get_random_direction() -> Vec2 {
 }
 
 // Bounce off walls of window.
-fn resolve_collisions(particle: &mut Particle, transform: &mut Transform, window_state: &Window) {
-    let window_width: f32;
-    let window_height: f32;
-    
-    if BUILD_FOR_WEB {
-        window_width = WINDOW_WIDTH;
-        window_height = WINDOW_HEIGHT;
-    } else {
-        window_width = window_state.width();
-        window_height = window_state.height();
-    }
-
-    let half_bound_size_x = window_width / 2.0 - PARTICLE_RADIUS;
-    let half_bound_size_y = window_height / 2.0 - PARTICLE_RADIUS;
+fn resolve_collisions(particle: &mut Particle, transform: &mut Transform) {
+    let half_bound_size_x = WINDOW_WIDTH / 2.0 - PARTICLE_RADIUS;
+    let half_bound_size_y = WINDOW_HEIGHT / 2.0 - PARTICLE_RADIUS;
 
     if transform.translation.x.abs() > half_bound_size_x {
         transform.translation.x = half_bound_size_x * sign(transform.translation.x);
