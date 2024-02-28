@@ -1,4 +1,4 @@
-use bevy::{prelude::*, sprite::MaterialMesh2dBundle};
+use bevy::prelude::*;
 use bevy::prelude::shape::UVSphere;
 
 #[derive(Component, Debug, PartialEq)]
@@ -76,70 +76,38 @@ impl ParticleGrid {
         mut meshes: ResMut<Assets<Mesh>>,
         mut materials: ResMut<Assets<StandardMaterial>>,
     ) {
-        // spawn particles in a grid
-        let particles_per_layer: i32 = (num_particles as f32).sqrt() as i32;
-        let particles_per_row: i32 = (num_particles as f32).sqrt() as i32;
-        let particles_per_col: i32 = (num_particles as i32 - 1) / particles_per_row + 1;
-        let spacing: f32 = particle_radius * 2.0;
+        // Spawn particles in a cube layout.
+        // Cube width is limited by the smallest dimension of the boundary - we want particles to fill boundary as much as possible
+        // as this looks better.
+        // todo: spawn particles to fit the boundary better, rather than always being a cube
+        let min_boundary_side_length = f32::min(self.boundary_dimensions.x, f32::min(self.boundary_dimensions.y, self.boundary_dimensions.z));
+        let particles_per_side: i32 = (num_particles as f32).powf(1.0 / 3.0).ceil() as i32;
+        let spacing: f32 = min_boundary_side_length / particles_per_side as f32;
 
-        for i in 0..num_particles {
-            let x = ((i as i32 % particles_per_row - particles_per_row / 2) as f32 + 0.5) as f32 * spacing;
-            let y = ((i as i32 / particles_per_row - particles_per_col / 2) as f32 + 0.5) as f32 * spacing;
-            let z = x;
-            let (layer, row, col) = self.position_to_grid_index(&x, &y, &z);
+        for l in 0..particles_per_side {
+            for r in 0..particles_per_side {
+                for c in 0..particles_per_side {
+                    let x = ((c - particles_per_side / 2) as f32 + 0.5) as f32 * spacing;
+                    let y = ((l - particles_per_side / 2) as f32 + 0.5) as f32 * spacing;
+                    let z = ((r - particles_per_side / 2) as f32 + 0.5) as f32 * spacing;
 
-            let mut particle = Particle::new();
-            particle.particle_grid_index = (layer, row, col);
+                    let (layer, row, col) = self.position_to_grid_index(&x, &y, &z);
+                    let mut particle = Particle::new();
+                    particle.particle_grid_index = (layer, row, col);
 
-            let transform = Transform::from_translation(Vec3::new(x, y, z));
+                    let entity = commands
+                        .spawn(particle)
+                        .insert(PbrBundle {
+                            mesh: meshes.add(Mesh::from(UVSphere { radius: particle_radius, ..Default::default() })),
+                            material: materials.add(StandardMaterial::from(Color::WHITE)),
+                            transform: Transform::from_translation(Vec3::new(x, y, z)),
+                            ..default()
+                        }).id();
 
-            // let entity = commands
-            //     .spawn(particle)
-            //     .insert(MaterialMesh2dBundle {
-            //         mesh: meshes.add(shape::Circle {
-            //             radius: particle_radius,
-            //             ..Default::default()
-            //         }.into()).into(),
-            //         material: materials.add(ColorMaterial::from(Color::WHITE)),
-            //         transform: transform,
-            //         ..Default::default()
-            //     }).id();
-
-            let entity = commands
-                .spawn(particle)
-                .insert(PbrBundle {
-                    mesh: meshes.add(Mesh::from(UVSphere { radius: particle_radius, ..Default::default() })),
-                    material: materials.add(StandardMaterial::from(Color::WHITE)),
-                    transform: transform,
-                    ..default()
-                }).id();
-
-            // info!("Spawned particle at ({}, {}, {})", x, y, z);
-
-            self.particles[layer][row][col].push(entity);
+                    self.particles[layer][row][col].push(entity);
+                }
+            }
         }
-
-        // spawn light
-        commands.spawn((
-            PointLightBundle {
-            point_light: PointLight {
-                // shadows_enabled: true,
-                intensity: 10000.0,
-                ..default()
-            },
-            transform: Transform::from_xyz(4.0, 8.0, 4.0),
-            ..default()
-        },
-        // PointLightBundle {
-        //     point_light: PointLight {
-        //         // shadows_enabled: true,
-        //         intensity: 10000.0,
-        //         ..default()
-        //     },
-        //     transform: Transform::from_xyz(-4.0, -8.0, -4.0),
-        //     ..default()
-        // },
-    ));
     }
 
     // Update the grid with the current positions of the particles, and assign each particle to a cell using predicted positions.

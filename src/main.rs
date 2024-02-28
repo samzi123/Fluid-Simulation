@@ -1,13 +1,16 @@
 mod particle_grid;
+mod camera;
+mod kernel_functions;
 // used for better error messages in web assembly
 extern crate console_error_panic_hook;
+
+use camera::{MainCamera, spawn_camera_and_lights, pan_orbit_camera, get_mouse_world_position};
+use kernel_functions::{smoothing_kernel, smoothing_kernel_derivative, viscosity_smoothing_kernel};
 
 use bevy::prelude::*;
 use bevy::ecs::query::BatchingStrategy;
 use bevy::window::{PrimaryWindow, PresentMode};
 use bevy::utils::Instant;
-use bevy::input::mouse::MouseWheel;
-use bevy::input::mouse::MouseMotion;
 
 use rand::Rng;
 use particle_grid::{Particle, ParticleGrid};
@@ -16,29 +19,6 @@ use rayon::prelude::*;
 /// We will store the world position of the mouse cursor here.
 #[derive(Resource, Default)]
 struct MyWorldCoords(Vec3);
-
-/// Used to help identify our main camera
-#[derive(Component)]
-struct MainCamera;
-
-/// Tags an entity as capable of panning and orbiting.
-#[derive(Component)]
-struct PanOrbitCamera {
-    /// The "focus point" to orbit around. It is automatically updated when panning the camera
-    pub focus: Vec3,
-    pub radius: f32,
-    pub upside_down: bool,
-}
-
-impl Default for PanOrbitCamera {
-    fn default() -> Self {
-        PanOrbitCamera {
-            focus: Vec3::ZERO,
-            radius: 5.0,
-            upside_down: false,
-        }
-    }
-}
 
 #[derive(Component)]
 struct Timer {
@@ -49,27 +29,27 @@ struct Timer {
 
 const NUM_PARTICLES: usize = 1052;
 const VISUALIZE_COLOR_BASED_ON: &str = "density"; // density or velocity
-const PARTICLE_RADIUS: f32 = 0.1;
+const PARTICLE_RADIUS: f32 = 0.3;
 const RESPOND_TO_MOUSE: bool = false;
 const MOUSE_RADIUS: f32 = 150.0;
-const BOUNDARY_DIMENSIONS: Vec3 = Vec3::new(10.0, 10.0, 20.0);
+const BOUNDARY_DIMENSIONS: Vec3 = Vec3::new(15.0, 10.0, 7.0);
 // how much force the mouse applies to the particles
 const MOUSE_PRESSURE_MULTIPLIER: f32 = 10.0;
-const GRAVITY: f32 = 0.;
+const GRAVITY: f32 = 0.5;
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
-const SMOOTHING_RADIUS: f32 = 3.;
-const TARGET_DENSITY: f32 = 1.0;
-const PRESSURE_MULTIPLIER: f32 = 2.;
+const SMOOTHING_RADIUS: f32 = 3.0;
+const TARGET_DENSITY: f32 = 10.;
+const PRESSURE_MULTIPLIER: f32 = 3.;
 const VISCOSITY_STRENGTH: f32 = 0.007;
 const RUN_STOPWATCH: bool = false;
 // how many times to run the simulation before printing the average time to update positions
 const NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH: u32 = 300;
 // How much the bounding box edge repels particles.
 // X value is for left/right walls, Y value is for top/bottom walls, Z value is for front/back walls.
-const BOUNDARY_PRESSURE_MULTIPLIER: Vec3 = Vec3::new(0.01, 0.01, 0.01);
+const BOUNDARY_PRESSURE_MULTIPLIER: Vec3 = Vec3::new(0.5, 0.5, 0.5);
 const BUILD_FOR_WEB: bool = false;
 const MOUSE_SCROLL_SPEED: f32 = 0.05;
 const MOUSE_PAN_SPEED: f32 = 1.0;
@@ -83,9 +63,9 @@ fn main() {
     app
         .init_resource::<MyWorldCoords>()
         .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
-        // .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         .add_systems(Startup, setup)
         .add_systems(FixedUpdate, (update_particle_positions, update_densities, pan_orbit_camera));
+        // .add_systems(FixedUpdate, (pan_orbit_camera));
 
     if BUILD_FOR_WEB == false {
         app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -118,31 +98,13 @@ fn main() {
 fn setup(
     mut commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let camera_transform = Transform::from_xyz(-3.0, 5.5, 30.0).looking_at(Vec3::ZERO, Vec3::Y);
-    let rotation_radius = camera_transform.translation.length();
+    if RUN_STOPWATCH {
+        commands.spawn(Timer { start_time: Instant::now(), num_iters: NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH });
+    }
 
-    // spawn camera
-    commands.spawn((
-        Camera3dBundle {
-        transform: camera_transform,
-        ..default()
-        }, 
-        MainCamera, 
-        // Camera3dBundle {
-        //     transform: Transform::from_translation(translation)
-        //         .looking_at(Vec3::ZERO, Vec3::Y),
-        //     ..Default::default()
-        // },
-        PanOrbitCamera {
-            radius: rotation_radius,
-            ..Default::default()
-        },
-        Timer { start_time: Instant::now(), num_iters: NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH }
-    ));
-    // commands.spawn((Camera2dBundle::default(), MainCamera, Timer { start_time: Instant::now(), num_iters: NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH }));
+    spawn_camera_and_lights(&mut commands);
     spawn_particles(commands, meshes, materials);
 }
 
@@ -159,102 +121,6 @@ fn spawn_particles(
     let mut particle_grid = ParticleGrid::new(SMOOTHING_RADIUS, num_layers, num_rows, num_cols, WINDOW_WIDTH, WINDOW_HEIGHT, BOUNDARY_DIMENSIONS);
     particle_grid.spawn_particles(NUM_PARTICLES, PARTICLE_RADIUS, &mut commands, meshes, materials);
     commands.spawn(particle_grid);
-}
-
-/// Pan the camera with middle mouse click, zoom with scroll wheel, orbit with right mouse click.
-fn pan_orbit_camera(
-    q_window: Query<&Window, With<PrimaryWindow>>,
-    mut ev_motion: EventReader<MouseMotion>,
-    mut ev_scroll: EventReader<MouseWheel>,
-    input_mouse: Res<Input<MouseButton>>,
-    mut query: Query<(&mut PanOrbitCamera, &mut Transform, &Projection)>,
-) {
-    // change input mapping for orbit and panning here
-    let orbit_button = MouseButton::Left;
-    let pan_button = MouseButton::Right;
-
-    let mut pan = Vec2::ZERO;
-    let mut rotation_move = Vec2::ZERO;
-    let mut scroll = 0.0;
-    let mut orbit_button_changed = false;
-
-    if input_mouse.pressed(orbit_button) {
-        for ev in ev_motion.iter() {
-            rotation_move += ev.delta * MOUSE_ROTATE_SPEED;
-        }
-    } else if input_mouse.pressed(pan_button) {
-        // Pan only if we're not rotating at the moment
-        for ev in ev_motion.iter() {
-            pan += ev.delta * MOUSE_PAN_SPEED;
-        }
-    }
-    for ev in ev_scroll.iter() {
-        scroll += ev.y * MOUSE_SCROLL_SPEED;
-    }
-    if input_mouse.just_released(orbit_button) || input_mouse.just_pressed(orbit_button) {
-        orbit_button_changed = true;
-    }
-
-    for (mut pan_orbit, mut transform, projection) in query.iter_mut() {
-        if orbit_button_changed {
-            // only check for upside down when orbiting started or ended this frame
-            // if the camera is "upside" down, panning horizontally would be inverted, so invert the input to make it correct
-            let up = transform.rotation * Vec3::Y;
-            pan_orbit.upside_down = up.y <= 0.0;
-        }
-
-        let mut any = false;
-        if rotation_move.length_squared() > 0.0 {
-            any = true;
-            let window = get_primary_window_size(&q_window);
-            let delta_x = {
-                let delta = rotation_move.x / window.x * std::f32::consts::PI * 2.0;
-                if pan_orbit.upside_down { -delta } else { delta }
-            };
-            let delta_y = rotation_move.y / window.y * std::f32::consts::PI;
-            let yaw = Quat::from_rotation_y(-delta_x);
-            let pitch = Quat::from_rotation_x(-delta_y);
-            transform.rotation = yaw * transform.rotation; // rotate around global y axis
-            transform.rotation = transform.rotation * pitch; // rotate around local x axis
-        } else if pan.length_squared() > 0.0 {
-            any = true;
-            // make panning distance independent of resolution and FOV,
-            let window = get_primary_window_size(&q_window);
-            if let Projection::Perspective(projection) = projection {
-                pan *= Vec2::new(projection.fov * projection.aspect_ratio, projection.fov) / window;
-            }
-            // translate by local axes
-            let right = transform.rotation * Vec3::X * -pan.x;
-            let up = transform.rotation * Vec3::Y * pan.y;
-            // make panning proportional to distance away from focus point
-            let translation = (right + up) * pan_orbit.radius;
-            pan_orbit.focus += translation;
-        } else if scroll.abs() > 0.0 {
-            any = true;
-            pan_orbit.radius -= scroll * pan_orbit.radius * 0.2;
-            // dont allow zoom to reach zero or you get stuck
-            pan_orbit.radius = f32::max(pan_orbit.radius, 0.05);
-        }
-
-        if any {
-            // emulating parent/child to make the yaw/y-axis rotation behave like a turntable
-            // parent = x and y rotation
-            // child = z-offset
-            let rot_matrix = Mat3::from_quat(transform.rotation);
-            transform.translation = pan_orbit.focus + rot_matrix.mul_vec3(Vec3::new(0.0, 0.0, pan_orbit.radius));
-        }
-    }
-
-    // consume any remaining events, so they don't pile up if we don't need them
-    // (and also to avoid Bevy warning us about not checking events every frame update)
-    ev_motion.clear();
-}
-
-fn get_primary_window_size(q_window: &Query<&Window, With<PrimaryWindow>>) -> Vec2 {
-    let window = q_window.get_single().unwrap();
-    // let window = windows.get_primary().unwrap();
-    let window = Vec2::new(window.width() as f32, window.height() as f32);
-    window
 }
 
 // Updates the position of the particles based on their density and pressure.
@@ -342,33 +208,6 @@ fn update_particle_positions(
 
             resolve_collisions(&mut particle, &mut transform);
         });
-}
-
-// Returns the mouse position in world coordinates
-fn get_mouse_world_position(
-    mycoords: &mut ResMut<MyWorldCoords>,
-    // query to get the window (so we can read the current cursor position)
-    window_state: &Window,
-    // query to get camera transform
-    q_camera: &Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-) -> Option<Vec3> {
-    // get the camera info and transform
-    // assuming there is exactly one main camera entity, so Query::single() is OK
-    let (camera, camera_transform) = q_camera.single();
-
-    // check if the cursor is inside the window and get its position
-    // then, ask bevy to convert into world coordinates, and truncate to discard Z
-    if let Some(world_position) = window_state.cursor_position()
-        .and_then(|cursor| camera.viewport_to_world(camera_transform, cursor))
-        .map(|ray| ray.origin.truncate())
-    {
-        let world_position_vec3 = Vec3::new(world_position.x, world_position.y, 0.0);
-        mycoords.0 = world_position_vec3;
-        return Some(world_position_vec3);
-    }
-
-    // if the cursor is not inside the window, we don't update the world position
-    return None;
 }
 
 // Returns the force acting on a particle due to its proximity to the edge of the window.
@@ -463,11 +302,6 @@ fn calculate_force_between_two_particles(dir: Vec3, dist: &f32, density_1: f32, 
     Vec3::new(0.0, 0.0, 0.0)
 }
 
-fn get_random_direction() -> Vec3 {
-    let mut rng = rand::thread_rng();
-    return Vec3::new(rng.gen(), rng.gen(), rng.gen());
-}
-
 // Bounce off walls of window.
 fn resolve_collisions(particle: &mut Particle, transform: &mut Transform) {
     let half_bound_size_x = BOUNDARY_DIMENSIONS.x / 2.0 - PARTICLE_RADIUS;
@@ -501,26 +335,9 @@ fn sign(x: f32) -> f32 {
     }
 }
 
-// Custom SPH function for viscosity force.
-fn viscosity_smoothing_kernel(radius: &f32, dst: &f32) -> f32 {
-    let value = f32::max(0., radius * radius - dst * dst);
-    value * value * value / (radius * radius * radius * radius * radius * radius)
-}
-
-// Calculate the relative 'influence' of a particle at a given distance from a point.
-fn smoothing_kernel(radius: &f32, dst: &f32) -> f32 {
-    if dst >= radius {
-        return 0.0;
-    }
-
-    let volume = (std::f32::consts::PI * radius.powi(4)) / 6.0;
-    return (radius - dst) * (radius - dst) / volume;
-}
-
-// Calculates gradient of the smoothing kernel at a given distance.
-fn smoothing_kernel_derivative(radius: &f32, dst: &f32) -> f32 {
-    let scale = 12. / (std::f32::consts::PI * radius.powi(4));
-    return scale * (dst - radius);
+fn get_random_direction() -> Vec3 {
+    let mut rng = rand::thread_rng();
+    return Vec3::new(rng.gen(), rng.gen(), rng.gen());
 }
 
 // Calculate and cache the density of each particle.
@@ -579,7 +396,8 @@ fn set_particle_color_based_on_property(particle: &Particle, color: &mut Color) 
     let green: f32;
 
     if VISUALIZE_COLOR_BASED_ON == "density" {
-        dist_from_target_property = (particle.density - TARGET_DENSITY) * 80.0;
+        // dist_from_target_property = (particle.density - TARGET_DENSITY) * 80.0;
+        dist_from_target_property = (particle.density - TARGET_DENSITY);
     } else {
         // dist_from_target_property = (particle.velocity.length() * 0.7) - 0.5;
         dist_from_target_property = (particle.velocity.length() * 2.0) - 0.5;
