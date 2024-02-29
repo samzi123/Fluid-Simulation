@@ -6,12 +6,16 @@ extern crate console_error_panic_hook;
 
 use camera::{MainCamera, spawn_camera_and_lights, pan_orbit_camera, get_mouse_world_position};
 use kernel_functions::{smoothing_kernel, smoothing_kernel_derivative, viscosity_smoothing_kernel};
+use particle_grid::{spawn_particles_grid};
 
 use bevy::prelude::*;
 use bevy::ecs::query::BatchingStrategy;
 use bevy::window::{PrimaryWindow, PresentMode};
 use bevy::utils::Instant;
-
+use bevy_aabb_instancing::{
+    Cuboid, CuboidMaterial, CuboidMaterialId, CuboidMaterialMap, Cuboids,
+    VertexPullingRenderPlugin, COLOR_MODE_SCALAR_HUE,
+};
 use rand::Rng;
 use particle_grid::{Particle, ParticleGrid};
 use rayon::prelude::*;
@@ -40,9 +44,9 @@ const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
 const COLLISION_DAMPING: f32 = 0.6;
 const PARTICLE_MASS: f32 = 1.0;
-const SMOOTHING_RADIUS: f32 = 3.0;
+const SMOOTHING_RADIUS: f32 = 2.5;
 const TARGET_DENSITY: f32 = 10.;
-const PRESSURE_MULTIPLIER: f32 = 3.;
+const PRESSURE_MULTIPLIER: f32 = 0.3;
 const VISCOSITY_STRENGTH: f32 = 0.007;
 const RUN_STOPWATCH: bool = false;
 // how many times to run the simulation before printing the average time to update positions
@@ -59,13 +63,6 @@ const MOUSE_ROTATE_SPEED: f32 = 1.0;
 fn main() {
     console_error_panic_hook::set_once();
     let mut app = App::new();
-
-    app
-        .init_resource::<MyWorldCoords>()
-        .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
-        .add_systems(Startup, setup)
-        .add_systems(FixedUpdate, (update_particle_positions, update_densities, pan_orbit_camera));
-        // .add_systems(FixedUpdate, (pan_orbit_camera));
 
     if BUILD_FOR_WEB == false {
         app.add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -92,35 +89,45 @@ fn main() {
         }));
     }
 
-    app.run();
+    app
+        .init_resource::<MyWorldCoords>()
+        .insert_resource(ClearColor(Color::rgb(0.0, 0.0, 0.0)))
+        .insert_resource(Msaa::Off)
+        .add_plugins(VertexPullingRenderPlugin { outlines: true })
+        .add_systems(Startup, setup)
+        .add_systems(Update, (update_particle_positions, update_densities, pan_orbit_camera, update_scalar_hue_options))
+        // .add_systems(FixedUpdate, (pan_orbit_camera, update_particle_positions))
+        // .add_systems(FixedUpdate, (pan_orbit_camera))
+        .run();
 }
 
 fn setup(
     mut commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<StandardMaterial>>,
+    mut material_map: ResMut<CuboidMaterialMap>
 ) {
     if RUN_STOPWATCH {
         commands.spawn(Timer { start_time: Instant::now(), num_iters: NUM_ITERATIONS_BEFORE_PRINT_STOPWATCH });
     }
 
     spawn_camera_and_lights(&mut commands);
-    spawn_particles(commands, meshes, materials);
+    spawn_particles(commands, meshes, materials, material_map);
 }
 
 fn spawn_particles(
     mut commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<StandardMaterial>>,
+    mut material_map: ResMut<CuboidMaterialMap>
 ) {
     // create spatial partitioning grid
     let num_layers = (BOUNDARY_DIMENSIONS.y / SMOOTHING_RADIUS).ceil() as usize;
     let num_rows = (BOUNDARY_DIMENSIONS.z / SMOOTHING_RADIUS).ceil() as usize;
     let num_cols = (BOUNDARY_DIMENSIONS.x / SMOOTHING_RADIUS).ceil() as usize;
 
-    let mut particle_grid = ParticleGrid::new(SMOOTHING_RADIUS, num_layers, num_rows, num_cols, WINDOW_WIDTH, WINDOW_HEIGHT, BOUNDARY_DIMENSIONS);
-    particle_grid.spawn_particles(NUM_PARTICLES, PARTICLE_RADIUS, &mut commands, meshes, materials);
-    commands.spawn(particle_grid);
+    // let mut particle_grid = ParticleGrid::new(SMOOTHING_RADIUS, num_layers, num_rows, num_cols, WINDOW_WIDTH, WINDOW_HEIGHT, BOUNDARY_DIMENSIONS);
+    spawn_particles_grid(NUM_PARTICLES, PARTICLE_RADIUS, &mut commands, meshes, materials, material_map, SMOOTHING_RADIUS, num_layers, num_rows, num_cols, WINDOW_WIDTH, WINDOW_HEIGHT, BOUNDARY_DIMENSIONS);
 }
 
 // Updates the position of the particles based on their density and pressure.
@@ -132,6 +139,7 @@ fn update_particle_positions(
     q_window: Query<&Window, With<PrimaryWindow>>, 
     q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>, 
     time: Res<Time>,
+    mut cuboids_query: Query<&mut Cuboids>,
 ) {
     if RUN_STOPWATCH {
         let mut timer = timer_query.get_single_mut().unwrap();
@@ -148,139 +156,172 @@ fn update_particle_positions(
     // let start_time = Instant::now();
     let window_state = q_window.get_single().unwrap();
     let mut grid = particle_grid_query.single_mut();
+    let mut cuboids = cuboids_query.single_mut();
+
+    // clear the cuboids so we can update them in the next draw call
+    // there is probably a moreefficient way of doing this that involves updating the cuboids in place
+    cuboids.instances.clear();
 
     // Calcualte each particle's predicted position to use for improved pressure force calculation.
     // Choose batch size of 32 to limit overhead of ParallelIterator, since getting predicted pos is inexpensive.
-    particles
-        .par_iter_mut()
-        .batching_strategy(BatchingStrategy::fixed(32))
-        .for_each(|(mut particle, transform, _)| {
-            particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -BOUNDARY_DIMENSIONS.x / 2.0 + PARTICLE_RADIUS);
-            particle.predicted_position.x = f32::min(particle.predicted_position.x, BOUNDARY_DIMENSIONS.x / 2.0 - PARTICLE_RADIUS);
-            particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -BOUNDARY_DIMENSIONS.y / 2.0 + PARTICLE_RADIUS);
-            particle.predicted_position.y = f32::min(particle.predicted_position.y, BOUNDARY_DIMENSIONS.y / 2.0 - PARTICLE_RADIUS);
-            particle.predicted_position.z = f32::max(transform.translation.z + particle.velocity.z * time.delta_seconds(), -BOUNDARY_DIMENSIONS.z / 2.0 + PARTICLE_RADIUS);
-            particle.predicted_position.z = f32::min(particle.predicted_position.z, BOUNDARY_DIMENSIONS.z / 2.0 - PARTICLE_RADIUS);
-        });
+    // particles
+    //     .par_iter_mut()
+    //     .batching_strategy(BatchingStrategy::fixed(32))
+    //     .for_each(|(mut particle, transform, _)| {
+    //         particle.predicted_position.x = f32::max(transform.translation.x + particle.velocity.x * time.delta_seconds(), -BOUNDARY_DIMENSIONS.x / 2.0 + PARTICLE_RADIUS);
+    //         particle.predicted_position.x = f32::min(particle.predicted_position.x, BOUNDARY_DIMENSIONS.x / 2.0 - PARTICLE_RADIUS);
+    //         particle.predicted_position.y = f32::max(transform.translation.y + (particle.velocity.y - GRAVITY) * time.delta_seconds(), -BOUNDARY_DIMENSIONS.y / 2.0 + PARTICLE_RADIUS);
+    //         particle.predicted_position.y = f32::min(particle.predicted_position.y, BOUNDARY_DIMENSIONS.y / 2.0 - PARTICLE_RADIUS);
+    //         particle.predicted_position.z = f32::max(transform.translation.z + particle.velocity.z * time.delta_seconds(), -BOUNDARY_DIMENSIONS.z / 2.0 + PARTICLE_RADIUS);
+    //         particle.predicted_position.z = f32::min(particle.predicted_position.z, BOUNDARY_DIMENSIONS.z / 2.0 - PARTICLE_RADIUS);
+    //     });
 
-    grid.update_particle_cells(&mut particles);
+    grid.update_particle_cells_and_predicted_positions(BOUNDARY_DIMENSIONS, PARTICLE_RADIUS, &time);
 
     if RESPOND_TO_MOUSE {
         let mouse_pos = get_mouse_world_position(&mut mycoords, &window_state, &q_camera);
 
         if mouse_pos != None {
             // find particles within mouse's radius and apply a force to them
-            let neighbours = grid.get_particles_adjacent_to_mouse(mycoords.0, &MOUSE_RADIUS);
+            let mut neighbours = grid.get_particles_adjacent_to_mouse(mycoords.0, &MOUSE_RADIUS);
 
-            unsafe {
-                neighbours.par_iter().for_each(|entity| {
-                    // This line is the reason we need the "unsafe" above.
-                    let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
-                    let dir = mycoords.0 - transform.translation;
-                    let euclidean_distance = dir.length();
-                    
-                    if euclidean_distance <= MOUSE_RADIUS {
-                        particle.velocity += smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * MOUSE_PRESSURE_MULTIPLIER * PRESSURE_MULTIPLIER * time.delta_seconds();
+            neighbours.par_iter_mut().for_each(|particle| {
+                let dir = mycoords.0 - particle.position;
+                let euclidean_distance = dir.length();
+                
+                if euclidean_distance <= MOUSE_RADIUS {
+                    particle.velocity += smoothing_kernel(&MOUSE_RADIUS, &euclidean_distance) * dir * MOUSE_PRESSURE_MULTIPLIER * PRESSURE_MULTIPLIER * time.delta_seconds();
+                }
+            });
+        }
+    }
+
+    update_pressure_forces(&mut particles, &mut grid);
+
+    let mut counter = 0;
+
+    for l in 0..grid.num_layers {
+        for r in 0..grid.num_rows {
+            for c in 0..grid.num_cols {
+                for particle in grid.particles[l][r][c].iter_mut() {
+                    counter += 1;
+                    // apply gravity
+                    particle.velocity.y -= GRAVITY * time.delta_seconds();
+
+                    if particle.density != 0.0 {
+                        // F = m * a, so a = F / m
+                        let pressure_force = particle.pressure_force / particle.density;
+                        particle.velocity += pressure_force * time.delta_seconds();
                     }
-                });
+                    
+                    particle.position.x += particle.velocity.x;
+                    particle.position.y += particle.velocity.y;
+                    particle.position.z += particle.velocity.z;
+
+                    particle.cuboid.minimum = Vec3::new(particle.position.x - (PARTICLE_RADIUS / 2.0), particle.position.y - (PARTICLE_RADIUS / 2.0), particle.position.z - (PARTICLE_RADIUS / 2.0));
+                    particle.cuboid.maximum = Vec3::new(particle.position.x + (PARTICLE_RADIUS / 2.0), particle.position.y + (PARTICLE_RADIUS / 2.0), particle.position.z + (PARTICLE_RADIUS / 2.0));
+                    
+                    // set color to red
+                    // particle.cuboid.color = 0xFF0000FF;
+
+                    cuboids.instances.push(particle.cuboid);
+
+                    resolve_collisions(particle);
+                }
             }
         }
     }
 
-    update_pressure_forces(&mut particles, &grid);
+    // info!("Number of particles: {}", counter);
 
-    particles
-        .par_iter_mut()
-        .batching_strategy(BatchingStrategy::fixed(32))
-        .for_each(|(mut particle, mut transform, _)| {
-            // apply gravity
-            particle.velocity.y -= GRAVITY * time.delta_seconds();
+    // particles
+    //     .par_iter_mut()
+    //     .batching_strategy(BatchingStrategy::fixed(32))
+    //     .for_each(|(mut particle, mut transform, _)| {
+    //         // apply gravity
+    //         particle.velocity.y -= GRAVITY * time.delta_seconds();
 
-            if particle.density != 0.0 {
-                // F = m * a, so a = F / m
-                let pressure_force = particle.pressure_force / particle.density;
-                particle.velocity += pressure_force * time.delta_seconds();
-            }
+    //         if particle.density != 0.0 {
+    //             // F = m * a, so a = F / m
+    //             let pressure_force = particle.pressure_force / particle.density;
+    //             particle.velocity += pressure_force * time.delta_seconds();
+    //         }
             
-            transform.translation.x += particle.velocity.x;
-            transform.translation.y += particle.velocity.y;
-            transform.translation.z += particle.velocity.z;
+    //         transform.translation.x += particle.velocity.x;
+    //         transform.translation.y += particle.velocity.y;
+    //         transform.translation.z += particle.velocity.z;
 
-            resolve_collisions(&mut particle, &mut transform);
-        });
+    //         resolve_collisions(&mut particle);
+    //     });
 }
 
 // Returns the force acting on a particle due to its proximity to the edge of the window.
 // For simplicity, assume the radius of influence of the window edge is the same as the smoothing radius.
-fn calculate_boundary_force(transform: &Transform) -> Vec3 {
+fn calculate_boundary_force(position: &Vec3) -> Vec3 {
     let mut force = Vec3::new(0.0, 0.0, 0.0);
-    let dist_from_x_boundary = (BOUNDARY_DIMENSIONS.x / 2.0) - transform.translation.x.abs();
-    let dist_from_y_boundary = (BOUNDARY_DIMENSIONS.y / 2.0) - transform.translation.y.abs();
-    let dist_from_z_boundary = (BOUNDARY_DIMENSIONS.z / 2.0) - transform.translation.z.abs();
+    let dist_from_x_boundary = (BOUNDARY_DIMENSIONS.x / 2.0) - position.x.abs();
+    let dist_from_y_boundary = (BOUNDARY_DIMENSIONS.y / 2.0) - position.y.abs();
+    let dist_from_z_boundary = (BOUNDARY_DIMENSIONS.z / 2.0) - position.z.abs();
 
     if dist_from_x_boundary < SMOOTHING_RADIUS {
-        force.x = BOUNDARY_PRESSURE_MULTIPLIER.x * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_x_boundary) * -sign(transform.translation.x);
+        force.x = BOUNDARY_PRESSURE_MULTIPLIER.x * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_x_boundary) * -sign(position.x);
     }
 
     if dist_from_y_boundary < SMOOTHING_RADIUS {
-        force.y = BOUNDARY_PRESSURE_MULTIPLIER.y * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_y_boundary) * -sign(transform.translation.y);
+        force.y = BOUNDARY_PRESSURE_MULTIPLIER.y * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_y_boundary) * -sign(position.y);
     }
 
     if dist_from_z_boundary < SMOOTHING_RADIUS {
-        force.z = BOUNDARY_PRESSURE_MULTIPLIER.z * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_z_boundary) * -sign(transform.translation.z);
+        force.z = BOUNDARY_PRESSURE_MULTIPLIER.z * viscosity_smoothing_kernel(&SMOOTHING_RADIUS, &dist_from_z_boundary) * -sign(position.z);
     }
 
     force
 }
 
 // Calculate the force between all particles to simulate pressure.
-fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<StandardMaterial>)>)>, particle_grid: &ParticleGrid) {
+fn update_pressure_forces(particles: &mut Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<StandardMaterial>)>)>, particle_grid: &mut ParticleGrid) {
     for layer in 0..particle_grid.num_layers {
-        particle_grid.particles[layer].par_iter().enumerate().for_each(|(row, _)| {
+        // particle_grid.particles[layer].par_iter().enumerate().for_each(|(row, _)| {
+        for row in 0..particle_grid.num_rows {
             for col in 0..particle_grid.num_cols {
-                for entity in particle_grid.particles[layer][row][col].iter() {
-                // particle_grid.particles[row][col].par_iter().for_each(|entity| {
-                    unsafe {
-                        let (mut particle, transform, _) = particles.get_unchecked(*entity).unwrap();
-                        let neighbours = particle_grid.get_particle_neighbours(&entity, layer, row, col);
-                        particle.pressure_force = Vec3::new(0.0, 0.0, 0.0);
+                for i in 0..particle_grid.particles[layer][row][col].len() {
+                // for particle in particle_grid.particles[layer][row][col].iter_mut() {
+                    let neighbours = particle_grid.get_particle_neighbours(&particle_grid.particles[layer][row][col][i], layer, row, col);
+                    let particle = &mut particle_grid.particles[layer][row][col][i];
+                    particle.pressure_force = Vec3::new(0.0, 0.0, 0.0);
 
-                        // if particle is along the edge of the window, apply a force to push it away
-                        if row == 0 || row == particle_grid.num_rows - 1 || col == 0 || col == particle_grid.num_cols - 1 || layer == 0 || layer == particle_grid.num_layers - 1 {
-                            particle.pressure_force += calculate_boundary_force(&transform);
+                    // if particle is along the edge of the window, apply a force to push it away
+                    if row == 0 || row == particle_grid.num_rows - 1 || col == 0 || col == particle_grid.num_cols - 1 || layer == 0 || layer == particle_grid.num_layers - 1 {
+                        particle.pressure_force += calculate_boundary_force(&particle.position);
+                    }
+
+                    for other_particle in neighbours.iter() {
+                        // direction and distance from particle to other particle
+                        let dir: Vec3;
+                        let dist = Vec3::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y, other_particle.predicted_position.z - particle.predicted_position.z).length();
+
+                        if dist >= SMOOTHING_RADIUS {
+                            continue;
                         }
 
-                        for other_entity in neighbours.iter() {
-                            // We need to wrap this in "unsafe" because of the second "get" called on particles here.
-                            let (other_particle, _, _) = particles.get_unchecked(*other_entity).unwrap();
-
-                            // direction and distance from particle to other particle
-                            let dir: Vec3;
-                            let dist = Vec3::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y, other_particle.predicted_position.z - particle.predicted_position.z).length();
-
-                            if dist >= SMOOTHING_RADIUS {
-                                continue;
-                            }
-
-                            if dist == 0.0 {
-                                // is there a better way of doing this?
-                                dir = get_random_direction();
-                            } else {
-                                dir = Vec3::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y, other_particle.predicted_position.z - particle.predicted_position.z) / dist;
-                            }
-
-                            // calculate pressure force due to other particle
-                            let pressure_force: Vec3 = calculate_force_between_two_particles(dir, &dist, particle.density, other_particle.density);
-                            
-                            // calcualte viscosity force
-                            let viscosity_force: Vec3 = calculate_viscosity_between_two_particles(&dist, &particle, &other_particle);
-
-                            particle.pressure_force += pressure_force + viscosity_force;
+                        if dist == 0.0 {
+                            // is there a better way of doing this?
+                            dir = get_random_direction();
+                        } else {
+                            dir = Vec3::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y, other_particle.predicted_position.z - particle.predicted_position.z) / dist;
                         }
+
+                        // calculate pressure force due to other particle
+                        let pressure_force: Vec3 = calculate_force_between_two_particles(dir, &dist, particle.density, other_particle.density);
+                        
+                        // calcualte viscosity force
+                        let viscosity_force: Vec3 = calculate_viscosity_between_two_particles(&dist, &particle, &other_particle);
+
+                        particle.pressure_force += pressure_force + viscosity_force;
                     }
                 }
             }
-        });
+        }
     }
 }
 
@@ -302,24 +343,31 @@ fn calculate_force_between_two_particles(dir: Vec3, dist: &f32, density_1: f32, 
     Vec3::new(0.0, 0.0, 0.0)
 }
 
+fn update_scalar_hue_options(time: Res<Time>, mut material_map: ResMut<CuboidMaterialMap>) {
+    let material = material_map.get_mut(CuboidMaterialId(1));
+    let tv = 1000.0 * (time.elapsed_seconds().sin() + 1.0);
+    material.scalar_hue.max_visible = tv;
+    material.scalar_hue.clamp_max = tv;
+}
+
 // Bounce off walls of window.
-fn resolve_collisions(particle: &mut Particle, transform: &mut Transform) {
+fn resolve_collisions(particle: &mut Particle) {
     let half_bound_size_x = BOUNDARY_DIMENSIONS.x / 2.0 - PARTICLE_RADIUS;
     let half_bound_size_y = BOUNDARY_DIMENSIONS.y / 2.0 - PARTICLE_RADIUS;
     let half_bound_size_z = BOUNDARY_DIMENSIONS.z / 2.0 - PARTICLE_RADIUS;
 
-    if transform.translation.x.abs() > half_bound_size_x {
-        transform.translation.x = half_bound_size_x * sign(transform.translation.x);
+    if particle.position.x.abs() > half_bound_size_x {
+        particle.position.x = half_bound_size_x * sign(particle.position.x);
         particle.velocity.x *= -COLLISION_DAMPING;
     }
 
-    if transform.translation.y.abs() > half_bound_size_y {
-        transform.translation.y = half_bound_size_y * sign(transform.translation.y);
+    if particle.position.y.abs() > half_bound_size_y {
+        particle.position.y = half_bound_size_y * sign(particle.position.y);
         particle.velocity.y *= -COLLISION_DAMPING;
     }
 
-    if transform.translation.z.abs() > half_bound_size_z {
-        transform.translation.z = half_bound_size_z * sign(transform.translation.z);
+    if particle.position.z.abs() > half_bound_size_z {
+        particle.position.z = half_bound_size_z * sign(particle.position.z);
         particle.velocity.z *= -COLLISION_DAMPING;
     }
 }
@@ -343,49 +391,45 @@ fn get_random_direction() -> Vec3 {
 // Calculate and cache the density of each particle.
 fn update_densities(mut particles: Query<(&mut Particle, &mut Transform, AnyOf<(&mut TextureAtlasSprite, &Handle<StandardMaterial>)>)>, mut materials: ResMut<Assets<StandardMaterial>>, mut particle_grid: Query<&mut ParticleGrid>) {
     // Use partition grid to calculate density of each particle.
-    let grid = particle_grid.single_mut();
+    let mut grid = particle_grid.single_mut();
 
     for layer in 0..grid.num_layers {
-        grid.particles[layer].par_iter().enumerate().for_each(|(row, _)| {
+        // grid.particles[layer].par_iter().enumerate().for_each(|(row, _)| {
+        for row in 0..grid.num_rows {
             for col in 0..grid.num_cols {
-                for entity in grid.particles[layer][row][col].iter() {
-                    unsafe {
-                        let (mut particle, _, _) = particles.get_unchecked(*entity).unwrap();
-                        let neighbours = grid.get_particle_neighbours(&entity, layer, row, col);
-                        particle.density = 0.0;
+                // for particle in grid.particles[layer][row][col].iter_mut() {
+                for i in 0..grid.particles[layer][row][col].len() {
+                    let neighbours = grid.get_particle_neighbours(&grid.particles[layer][row][col][i], layer, row, col);
+                    let particle = &mut grid.particles[layer][row][col][i];
+                    particle.density = 0.0;
 
-                        for other_entity in neighbours.iter() {
-                            // This line is the reason we need the "unsafe" above. 
-                            // The borrow checker doesn't like the second "get" called on particles here.
-                            let (other_particle, _, _) = particles.get_unchecked(*other_entity).unwrap();
-
-                            let distance = Vec3::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y, other_particle.predicted_position.z - particle.predicted_position.z).length();
-                            let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
-                            particle.density += PARTICLE_MASS * influence;
-                        }
+                    for other_particle in neighbours.iter() {
+                        let distance = Vec3::new(other_particle.predicted_position.x - particle.predicted_position.x, other_particle.predicted_position.y - particle.predicted_position.y, other_particle.predicted_position.z - particle.predicted_position.z).length();
+                        let influence = smoothing_kernel(&SMOOTHING_RADIUS, &distance);
+                        particle.density += PARTICLE_MASS * influence;
                     }
                 }
             }
-        });
-    }
-
-    // Set color based on velocity/density
-    // Note: can't use par_iter_mut here because we need to access the materials asset,
-    // and we can't access resources mutably without using locks.
-    for (particle, _, mut color_mat) in particles.iter_mut() {
-        let color_to_change: &mut Color;
-
-        if let Some(color_material) = &mut color_mat.0 {
-            color_to_change = &mut color_material.color;
-        } else if let Some(color_handle) = color_mat.1 {
-            let color_material = materials.get_mut(color_handle).unwrap();
-            color_to_change = &mut color_material.base_color;
-        } else {
-            return;
         }
-
-        set_particle_color_based_on_property(&particle, color_to_change);
     }
+
+    // // Set color based on velocity/density
+    // // Note: can't use par_iter_mut here because we need to access the materials asset,
+    // // and we can't access resources mutably without using locks.
+    // for (particle, _, mut color_mat) in particles.iter_mut() {
+    //     let color_to_change: &mut Color;
+
+    //     if let Some(color_material) = &mut color_mat.0 {
+    //         color_to_change = &mut color_material.color;
+    //     } else if let Some(color_handle) = color_mat.1 {
+    //         let color_material = materials.get_mut(color_handle).unwrap();
+    //         color_to_change = &mut color_material.base_color;
+    //     } else {
+    //         return;
+    //     }
+
+    //     set_particle_color_based_on_property(&particle, color_to_change);
+    // }
 }
 
 // red = density above target, green = at target density, blue = density below target
